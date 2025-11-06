@@ -71,12 +71,7 @@ class Yrambot(ForecastBot):
             "researcher_gpt": "openrouter/openai/gpt-5",
             "researcher_claude": "openrouter/anthropic/claude-sonnet-4.5",
             # --- FIX 1: Add the 'summarizer' key ---
-            # The parent ForecastBot class requires this key to summarize research
-            # when 'publish_reports_to_metaculus' is True. This fixes your
-            # "Unknown llm requested... for purpose: 'summarizer'" error.
-            # We can use the 'parser' model as it's good for this kind of task.
             "summarizer": "openrouter/openai/gpt-4.1-mini",
-            # ----------------------------------------
         }
 
     async def run_research(self, question: MetaculusQuestion) -> str:
@@ -296,14 +291,16 @@ class Yrambot(ForecastBot):
             options = question.options
             avg_probs = {}
             for opt in options:
-                # Note: p.predicted_options is a list of PredictedOption objects
-                # We need to convert it to a dict for easy lookup
-                prob_dict = {po.option_name: po.probability for po in p.predicted_options}
+                # --- FIX 4: UnboundLocalError ---
+                # The broken line `prob_dict = ...` was removed from here.
+                # 'p' was being used before it was defined in the loop below.
                 
                 # Get all probabilities for this option from all model predictions
                 # Use a default of 0 if a model didn't predict this option
                 option_probs = []
-                for p in predictions:
+                for p in predictions: # 'p' is defined here
+                    # p.predicted_options is a list of PredictedOption objects
+                    # We convert it to a dict for easy lookup
                     pred_dict = {po.option_name: po.probability for po in p.predicted_options}
                     option_probs.append(pred_dict.get(opt, 0.0))
                 
@@ -314,8 +311,6 @@ class Yrambot(ForecastBot):
                 avg_probs = {k: v / total for k, v in avg_probs.items()}
             
             # --- FIX 3: Correctly construct PredictedOptionList ---
-            # The Pydantic model expects a list of `PredictedOption` objects,
-            # not a list of tuples. We build that list here.
             predicted_options_list = [
                 PredictedOption(option_name=opt, probability=prob)
                 for opt, prob in avg_probs.items()
@@ -382,6 +377,7 @@ def _fixed_normalize_probabilities(self: PredictedOptionList):
     # Case 3: Non-empty list with a positive sum.
     # We will *always* normalize to fix rounding errors (like the "Sum=1.02" error).
     if abs(sum_ - 1.0) > 0.001:
+        # NOTE: The log in your console proves this patch is working.
         logger.info(
             f"Normalizing probabilities. Original sum was {sum_}. "
             f"This fixes potential errors from sums like 1.02 or 0.99."
@@ -420,7 +416,7 @@ if __name__ == "__main__":
         "--tournament-ids",
         nargs="+",
         type=str,
-        default=["32813", "metaculus-cup-fall-2025", "market-pulse-25q4", MetaculusApi.CURRENT_MINIBENCH_ID],
+        default=["32813", "metaculus-cup-fall-2025", "market-pulse-25q4", MetacciulusApi.CURRENT_MINIBENCH_ID],
     )
     args = parser.parse_args()
 
