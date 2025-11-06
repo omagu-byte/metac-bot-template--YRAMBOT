@@ -5,6 +5,10 @@ import os
 from datetime import datetime
 from typing import List
 
+# --- FIX 2: Import pydantic validator for monkey-patching ---
+from pydantic import model_validator
+# -------------------------------------------------------------
+
 from forecasting_tools import (
     BinaryQuestion,
     ForecastBot,
@@ -17,6 +21,11 @@ from forecasting_tools import (
     Percentile,
     BinaryPrediction,
     PredictedOptionList,
+    # --- FIX 3: Import PredictedOption ---
+    # This class is needed to correctly construct the PredictedOptionList
+    # in your _make_prediction override.
+    PredictedOption,
+    # ------------------------------------
     ReasonedPrediction,
     clean_indents,
     structure_output,
@@ -61,6 +70,13 @@ class Yrambot(ForecastBot):
             "parser": "openrouter/openai/gpt-4.1-mini",
             "researcher_gpt": "openrouter/openai/gpt-5",
             "researcher_claude": "openrouter/anthropic/claude-sonnet-4.5",
+            # --- FIX 1: Add the 'summarizer' key ---
+            # The parent ForecastBot class requires this key to summarize research
+            # when 'publish_reports_to_metaculus' is True. This fixes your
+            # "Unknown llm requested... for purpose: 'summarizer'" error.
+            # We can use the 'parser' model as it's good for this kind of task.
+            "summarizer": "openrouter/openai/gpt-4.1-mini",
+            # ----------------------------------------
         }
 
     async def run_research(self, question: MetaculusQuestion) -> str:
@@ -280,15 +296,36 @@ class Yrambot(ForecastBot):
             options = question.options
             avg_probs = {}
             for opt in options:
-                probs = [dict(p.predicted_options).get(opt, 0) for p in predictions]
-                avg_probs[opt] = median(probs)
+                # Note: p.predicted_options is a list of PredictedOption objects
+                # We need to convert it to a dict for easy lookup
+                prob_dict = {po.option_name: po.probability for po in p.predicted_options}
+                
+                # Get all probabilities for this option from all model predictions
+                # Use a default of 0 if a model didn't predict this option
+                option_probs = []
+                for p in predictions:
+                    pred_dict = {po.option_name: po.probability for po in p.predicted_options}
+                    option_probs.append(pred_dict.get(opt, 0.0))
+                
+                avg_probs[opt] = median(option_probs)
+            
             total = sum(avg_probs.values())
             if total > 0:
                 avg_probs = {k: v / total for k, v in avg_probs.items()}
+            
+            # --- FIX 3: Correctly construct PredictedOptionList ---
+            # The Pydantic model expects a list of `PredictedOption` objects,
+            # not a list of tuples. We build that list here.
+            predicted_options_list = [
+                PredictedOption(option_name=opt, probability=prob)
+                for opt, prob in avg_probs.items()
+            ]
             final_pred = ReasonedPrediction(
-                prediction_value=PredictedOptionList(list(avg_probs.items())),
+                prediction_value=PredictedOptionList(predicted_options=predicted_options_list),
                 reasoning=" | ".join(reasonings)
             )
+            # -----------------------------------------------------
+
         elif isinstance(question, NumericQuestion):
             target_pts = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
             median_percentiles = []
@@ -304,9 +341,69 @@ class Yrambot(ForecastBot):
             final_dist = NumericDistribution.from_question(median_percentiles, question)
             final_pred = ReasonedPrediction(prediction_value=final_dist, reasoning=" | ".join(reasonings))
         else:
-            final_pred = predictions[0]
+            # Fallback in case of an issue
+            if predictions:
+                final_pred = ReasonedPrediction(prediction_value=predictions[0], reasoning=" | ".join(reasonings))
+            else:
+                raise ValueError("No predictions were generated.")
 
         return final_pred
+
+
+# ------------------------------------------------------------------
+# --- FIX 2: MONKEY-PATCH TO FIX PYDANTIC VALIDATOR ---
+# ------------------------------------------------------------------
+# This section dynamically replaces the broken validator in the imported
+# PredictedOptionList class with a new one that correctly handles
+# empty lists (sum=0) and rounding errors (sum=1.02).
+# This avoids needing to edit the library files directly.
+
+# 1. Define the new, correct validator function
+@model_validator(mode='after')
+def _fixed_normalize_probabilities(self: PredictedOptionList):
+    """
+    This is the fixed validator that will replace the original.
+    """
+    # Note: 'self' here is an instance of PredictedOptionList
+    if not self.predicted_options:
+        # Case 1: Empty list. Fixes "Sum=0" error.
+        return self
+
+    sum_ = sum(p.probability for p in self.predicted_options)
+
+    if sum_ <= 0:
+        # Case 2: Non-empty list, but sum is zero.
+        logger.warning(
+            f"PredictedOptionList has non-empty list but sum is {sum_}. "
+            f"Probabilities cannot be normalized. Raw options: {self.predicted_options}"
+        )
+        return self
+
+    # Case 3: Non-empty list with a positive sum.
+    # We will *always* normalize to fix rounding errors (like the "Sum=1.02" error).
+    if abs(sum_ - 1.0) > 0.001:
+        logger.info(
+            f"Normalizing probabilities. Original sum was {sum_}. "
+            f"This fixes potential errors from sums like 1.02 or 0.99."
+        )
+        for option in self.predicted_options:
+            option.probability = option.probability / sum_
+    
+    # Ensure no probabilities are negative after normalization (shouldn't happen if sum_ > 0)
+    for option in self.predicted_options:
+        if option.probability < 0:
+            option.probability = 0.0
+
+    return self
+
+# 2. Attach the new validator to the imported class, replacing the old one.
+# We re-assign the __pydantic_post_validate__ dunder method,
+# which is what `model_validator(mode='after')` creates.
+PredictedOptionList.__pydantic_post_validate__ = _fixed_normalize_probabilities
+
+logger.info("Monkey-patched 'PredictedOptionList' validator successfully.")
+# --- END OF MONKEY-PATCH ---
+# ------------------------------------------------------------------
 
 
 # -----------------------------
