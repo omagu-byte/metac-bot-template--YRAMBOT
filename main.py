@@ -70,7 +70,6 @@ class Yrambot(ForecastBot):
             "parser": "openrouter/openai/gpt-4.1-mini",
             "researcher_gpt": "openrouter/openai/gpt-5",
             "researcher_claude": "openrouter/anthropic/claude-sonnet-4.5",
-            # --- FIX 1: Add the 'summarizer' key ---
             "summarizer": "openrouter/openai/gpt-4.1-mini",
         }
 
@@ -416,7 +415,7 @@ if __name__ == "__main__":
         "--tournament-ids",
         nargs="+",
         type=str,
-        default=["32813", "metaculus-cup-fall-2025", "market-pulse-25q4", MetacciulusApi.CURRENT_MINIBENCH_ID],
+        default=["32813", "metaculus-cup-fall-2025", "market-pulse-25q4", MetaculusApi.CURRENT_MINIBENCH_ID],
     )
     args = parser.parse_args()
 
