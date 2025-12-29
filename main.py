@@ -2,16 +2,18 @@ import argparse
 import asyncio
 import logging
 import os
+import textwrap
+import re
 from datetime import datetime
 from typing import List
 
 # Tavily integration
 from tavily import TavilyClient
 
-# --- FIX 2: Import pydantic validator for monkey-patching ---
+# Pydantic for monkey-patching
 from pydantic import model_validator
-# -------------------------------------------------------------
 
+# Forecasting tools
 from forecasting_tools import (
     BinaryQuestion,
     ForecastBot,
@@ -45,6 +47,59 @@ def median(lst: List[float]) -> float:
         return float(sorted_lst[mid])
 
 # -----------------------------
+# TAVILY QUERY BUILDER (Robust, <400 chars)
+# -----------------------------
+def build_tavily_query(question: MetaculusQuestion, max_chars: int = 397) -> str:
+    """
+    Build a Tavily query ≤ max_chars (default 397 for safety).
+    Strategy:
+      1. Start with question_text (most important)
+      2. Add background only if it fits with ellipsis
+      3. Never exceed limit
+    """
+    q = question.question_text.strip()
+    bg = (question.background_info or "").strip()
+
+    # Remove URLs & excessive whitespace (saves space, improves relevance)
+    q = re.sub(r"http\S+", "", q)
+    bg = re.sub(r"http\S+", "", bg)
+    q = re.sub(r"\s+", " ", q).strip()
+    bg = re.sub(r"\s+", " ", bg).strip()
+
+    # Case 1: Question alone fits
+    if len(q) <= max_chars:
+        if not bg:
+            return q
+        # Try adding background with separator
+        candidate = f"{q} — {bg}"
+        if len(candidate) <= max_chars:
+            return candidate
+        # Background too long → truncate background
+        space_for_bg = max_chars - len(q) - 3  # " — "
+        if space_for_bg > 10:
+            bg_part = textwrap.shorten(bg, width=space_for_bg, placeholder="…")
+            return f"{q} — {bg_part}"
+        else:
+            return q
+
+    # Case 2: Question too long → shorten question first
+    # Keep first sentence + keywords from background
+    first_sent = q.split('.')[0].strip()
+    if len(first_sent) > max_chars:
+        return textwrap.shorten(first_sent, width=max_chars, placeholder="…")
+
+    # Now try: first sentence + background snippet
+    remaining = max_chars - len(first_sent) - 3  # " — "
+    if remaining > 10 and bg:
+        bg_part = textwrap.shorten(bg, width=remaining, placeholder="…")
+        combo = f"{first_sent} — {bg_part}"
+        if len(combo) <= max_chars:
+            return combo
+
+    # Fallback: just truncated question
+    return textwrap.shorten(q, width=max_chars, placeholder="…")
+
+# -----------------------------
 # Logging
 # -----------------------------
 logging.basicConfig(
@@ -54,9 +109,11 @@ logging.basicConfig(
 logger = logging.getLogger("Yrambot")
 
 # Initialize Tavily client
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-if not os.getenv("TAVILY_API_KEY"):
+tavily_api_key = os.getenv("TAVILY_API_KEY")
+if not tavily_api_key:
     raise EnvironmentError("TAVILY_API_KEY environment variable not set.")
+tavily_client = TavilyClient(api_key=tavily_api_key)
+
 
 class Yrambot(ForecastBot):
     """
@@ -80,10 +137,15 @@ class Yrambot(ForecastBot):
         async with self._concurrency_limiter:
             today_str = datetime.now().strftime("%Y-%m-%d")
             
-            # --- TAVILY RESEARCH ---
-            query = f"{question.question_text} {question.background_info or ''}".strip()
+            # --- ✅ SAFE TAVILY QUERY (ALWAYS ≤ 397 CHARS) ---
+            query = build_tavily_query(question)
+            logger.debug(f"Tavily query ({len(query)} chars): {repr(query)}")
+            
+            tavily_summary = "[Tavily research pending]"
             try:
-                tavily_response = await asyncio.get_event_loop().run_in_executor(
+                # Run sync Tavily call in thread pool
+                loop = asyncio.get_event_loop()
+                tavily_response = await loop.run_in_executor(
                     None,
                     lambda: tavily_client.search(
                         query=query,
@@ -95,16 +157,45 @@ class Yrambot(ForecastBot):
                         exclude_domains=[],
                     )
                 )
+                # Build clean summary
+                answer = tavily_response.get("answer", "No direct answer.")
+                results = tavily_response.get("results", [])
+                snippets = [
+                    f"[{i+1}] {r['title']}: {textwrap.shorten(r['content'], width=180, placeholder='…')}"
+                    for i, r in enumerate(results)
+                ]
                 tavily_summary = (
-                    f"Answer: {tavily_response.get('answer', 'No direct answer.')}\n"
-                    + "\n".join(
-                        f"[{i+1}] {r['title']}: {r['content']}" 
-                        for i, r in enumerate(tavily_response.get('results', []))
-                    )
+                    f"Answer: {answer}\n"
+                    + ("\n".join(snippets) if snippets else "[No results]")
                 )
+                logger.info(f"Tavily succeeded with {len(results)} results")
+                
             except Exception as e:
-                logger.error(f"Tavily research failed: {e}")
-                tavily_summary = f"[Tavily research error: {str(e)}]"
+                error_msg = str(e)
+                logger.error(f"Tavily research failed: {error_msg}")
+                
+                # 🔄 Fallback: aggressively truncated query
+                if "400 characters" in error_msg:
+                    logger.warning("→ Retrying with 200-char fallback query")
+                    try:
+                        short_query = textwrap.shorten(query, width=200, placeholder="…")
+                        logger.debug(f"Fallback query ({len(short_query)} chars): {repr(short_query)}")
+                        tavily_response = tavily_client.search(
+                            query=short_query,
+                            search_depth="basic",
+                            max_results=3
+                        )
+                        snippets = [
+                            f"[{i+1}] {r['title']}"
+                            for i, r in enumerate(tavily_response.get("results", []))
+                        ]
+                        tavily_summary = "[FALLBACK] " + ("\n".join(snippets) if snippets else "[No results]")
+                        logger.info("Tavily fallback succeeded")
+                    except Exception as e2:
+                        logger.error(f"Tavily fallback also failed: {e2}")
+                        tavily_summary = f"[Tavily failed: {error_msg} → {e2}]"
+                else:
+                    tavily_summary = f"[Tavily error: {error_msg}]"
 
             # --- LLM RESEARCH (optional supplement) ---
             gpt_prompt = clean_indents(f"""
@@ -339,6 +430,7 @@ class Yrambot(ForecastBot):
                 raise ValueError("No predictions generated.")
         return final_pred
 
+
 # ------------------------------------------------------------------
 # MONKEY-PATCH: Fix PredictedOptionList validator
 # ------------------------------------------------------------------
@@ -362,6 +454,7 @@ def _fixed_normalize_probabilities(self: PredictedOptionList):
 PredictedOptionList.__pydantic_post_validate__ = _fixed_normalize_probabilities
 logger.info("Monkey-patched 'PredictedOptionList' validator successfully.")
 
+
 # -----------------------------
 # MAIN
 # -----------------------------
@@ -377,10 +470,10 @@ if __name__ == "__main__":
         type=str,
         default=[
             "32813",
-            "32916",                    # added
-            "ACX2026",                  # added
-            "metaculus-cup-fall-2026",
-            "market-pulse-26q1",        # replaced 25q4 → 26q1
+            "32916",
+            "ACX2026",
+            "metaculus-cup-fall-2025",
+            "market-pulse-26q1",
             MetaculusApi.CURRENT_MINIBENCH_ID
         ],
     )
@@ -400,4 +493,4 @@ if __name__ == "__main__":
         all_reports.extend(reports)
 
     bot.log_report_summary(all_reports)
-    logger.info("✅ Yrambot (Bold + Tavily) run completed.")
+    logger.info("✅ Yrambot (Bold + Tavily) run completed — queries now safely ≤400 chars.")
