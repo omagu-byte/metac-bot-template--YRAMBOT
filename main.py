@@ -5,6 +5,9 @@ import os
 from datetime import datetime
 from typing import List
 
+# Tavily integration
+from tavily import TavilyClient
+
 # --- FIX 2: Import pydantic validator for monkey-patching ---
 from pydantic import model_validator
 # -------------------------------------------------------------
@@ -21,11 +24,7 @@ from forecasting_tools import (
     Percentile,
     BinaryPrediction,
     PredictedOptionList,
-    # --- FIX 3: Import PredictedOption ---
-    # This class is needed to correctly construct the PredictedOptionList
-    # in your _make_prediction override.
     PredictedOption,
-    # ------------------------------------
     ReasonedPrediction,
     clean_indents,
     structure_output,
@@ -54,11 +53,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Yrambot")
 
+# Initialize Tavily client
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+if not os.getenv("TAVILY_API_KEY"):
+    raise EnvironmentError("TAVILY_API_KEY environment variable not set.")
 
 class Yrambot(ForecastBot):
     """
-    Conservative hybrid forecaster using only GPT-5 and Claude Sonnet 4.5.
-    No external news or web search — relies on model knowledge with strong temporal awareness.
+    BOLD superforecaster hybrid using GPT-5, Claude Sonnet 4.5, and REAL-TIME Tavily research.
+    Leverages base rates, trend momentum, and statistical confidence — not conservatism.
     """
 
     _max_concurrent_questions = 1
@@ -77,42 +80,65 @@ class Yrambot(ForecastBot):
         async with self._concurrency_limiter:
             today_str = datetime.now().strftime("%Y-%m-%d")
             
+            # --- TAVILY RESEARCH ---
+            query = f"{question.question_text} {question.background_info or ''}".strip()
+            try:
+                tavily_response = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: tavily_client.search(
+                        query=query,
+                        search_depth="advanced",
+                        include_answer=True,
+                        max_results=6,
+                        include_raw_content=False,
+                        include_domains=[],
+                        exclude_domains=[],
+                    )
+                )
+                tavily_summary = (
+                    f"Answer: {tavily_response.get('answer', 'No direct answer.')}\n"
+                    + "\n".join(
+                        f"[{i+1}] {r['title']}: {r['content']}" 
+                        for i, r in enumerate(tavily_response.get('results', []))
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Tavily research failed: {e}")
+                tavily_summary = f"[Tavily research error: {str(e)}]"
+
+            # --- LLM RESEARCH (optional supplement) ---
             gpt_prompt = clean_indents(f"""
-                You are an expert researcher with deep world knowledge up to June 2024, but you understand that today is {today_str}.
-                Analyze the following forecasting question with attention to recent developments, trends, and timing.
+                You are a world-class superforecaster with knowledge up to June 2024, but you know today is {today_str}.
+                Analyze the following forecasting question with strategic boldness and statistical rigor.
 
                 Question: {question.question_text}
                 Background: {question.background_info or 'None provided'}
                 Resolution criteria: {question.resolution_criteria or 'Standard'}
                 Fine print: {question.fine_print or 'None'}
 
-                Consider:
-                - How much time remains until resolution?
-                - Has anything changed recently that affects this outcome?
-                - What is the status quo? (World changes slowly.)
-                - Are there known upcoming events (elections, product launches, policy deadlines)?
-                - If uncertain, say so. Do not hallucinate.
+                Focus on:
+                - Base rates and historical analogs
+                - Trend momentum (is the trajectory accelerating or stalling?)
+                - Key decision-makers and upcoming deadlines
+                - Asymmetric risks (what would make this outcome much more or less likely?)
+                - Don’t hedge—be boldly calibrated.
 
-                Provide a concise, factual summary for a professional forecaster.
+                Provide a sharp, evidence-based summary. Avoid fluff.
             """)
-            
+
             claude_prompt = clean_indents(f"""
-                You are Claude Sonnet 4.5, a precise and cautious AI with knowledge cutoff in early 2024, but aware that today is {today_str}.
-                Your task: analyze the forecasting question below with strong temporal reasoning.
+                You are Claude Sonnet 4.5. Today is {today_str}. Be precise, statistical, and unafraid of confident inference.
 
                 Question: {question.question_text}
                 Context: {question.background_info or 'Not specified'}
                 Resolution rules: {question.resolution_criteria or 'Default'}
 
-                Focus on:
-                - Recency: Is this question about a near-term or long-term event?
-                - Plausibility given current date ({today_str})
-                - Base rates and historical analogs
-                - Known constraints or scheduled events before resolution
+                Apply:
+                - Reference class forecasting
+                - Regression to the mean vs. disruption potential
+                - Known inflection points before resolution
 
-                Be honest about uncertainty. Avoid speculation beyond your knowledge.
-
-                Output only relevant facts and reasoned considerations.
+                Output only high-signal insights. No filler.
             """)
 
             try:
@@ -126,15 +152,16 @@ class Yrambot(ForecastBot):
                 claude_response = f"[Claude Sonnet research failed: {str(e)}]"
 
             return (
-                f"--- RESEARCH FROM GPT-5 (as of {today_str}) ---\n{gpt_response}\n\n"
-                f"--- RESEARCH FROM CLAUDE SONNET 4.5 (as of {today_str}) ---\n{claude_response}\n"
+                f"--- TAVILY REAL-TIME RESEARCH (as of {today_str}) ---\n{tavily_summary}\n\n"
+                f"--- GPT-5 FORECASTER ANALYSIS ---\n{gpt_response}\n\n"
+                f"--- CLAUDE SONNET STRATEGIC REVIEW ---\n{claude_response}\n"
             )
 
     async def _run_forecast_on_binary(
         self, question: BinaryQuestion, research: str
     ) -> ReasonedPrediction[float]:
         prompt = clean_indents(f"""
-            You are a professional forecaster known for conservative, well-calibrated predictions.
+            You are a top-tier superforecaster known for bold, well-calibrated, and statistically grounded predictions.
             Today is {datetime.now().strftime('%Y-%m-%d')}.
 
             Question: {question.question_text}
@@ -143,15 +170,15 @@ class Yrambot(ForecastBot):
             Fine print: {question.fine_print}
             Research: {research}
 
-            Consider:
-            (a) Time until resolution
-            (b) Status quo bias — the world changes slowly
-            (c) Base rates
-            (d) Model disagreements in research
+            Apply:
+            (a) Reference class: What’s the base rate?
+            (b) Trend vector: Is momentum increasing or decaying?
+            (c) Key thresholds: What would push this over the edge?
+            (d) Time until resolution: How much can realistically change?
 
-            Be humble. Avoid overconfidence.
+            Be confident. Avoid false modesty. If evidence points strongly, say so.
 
-            The last thing you write is your final answer as: "Probability: ZZ%", 0–100
+            Final line: "Probability: ZZ%" (0–100)
         """)
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
         binary_pred: BinaryPrediction = await structure_output(
@@ -164,7 +191,7 @@ class Yrambot(ForecastBot):
         self, question: MultipleChoiceQuestion, research: str
     ) -> ReasonedPrediction[PredictedOptionList]:
         prompt = clean_indents(f"""
-            You are a professional forecaster.
+            You are a superforecaster using base rates, momentum, and scenario analysis.
 
             Question: {question.question_text}
             Options: {question.options}
@@ -174,14 +201,14 @@ class Yrambot(ForecastBot):
             Research: {research}
             Today: {datetime.now().strftime('%Y-%m-%d')}
 
-            Before answering:
-            (a) Time until resolution
-            (b) Status quo outcome
-            (c) Unexpected scenario
+            Assign probabilities based on:
+            - Likelihood of status quo vs. disruption
+            - Historical frequencies of similar outcomes
+            - Upcoming catalysts
 
-            Remember: leave moderate probability on most options.
+            Be decisive. Don’t spread probability thinly unless truly ambiguous.
 
-            The last thing you write is your final probabilities as:
+            Final output format:
             Option_A: XX%
             Option_B: YY%
             ...
@@ -199,16 +226,13 @@ class Yrambot(ForecastBot):
     async def _run_forecast_on_numeric(
         self, question: NumericQuestion, research: str
     ) -> ReasonedPrediction[NumericDistribution]:
-        lower_msg = f"The outcome cannot be lower than {question.lower_bound}." if not question.open_lower_bound else f"The question creator thinks it's unlikely to be below {question.lower_bound}."
-        upper_msg = f"The outcome cannot be higher than {question.upper_bound}." if not question.open_upper_bound else f"The question creator thinks it's unlikely to be above {question.upper_bound}."
+        lower_msg = f"The outcome cannot be lower than {question.lower_bound}." if not question.open_lower_bound else f"Unlikely below {question.lower_bound}."
+        upper_msg = f"The outcome cannot be higher than {question.upper_bound}." if not question.open_upper_bound else f"Unlikely above {question.upper_bound}."
 
         prompt = clean_indents(f"""
-            You are a professional forecaster.
+            You are a quantitative superforecaster. Think in distributions, not point estimates.
 
             Question: {question.question_text}
-            Background: {question.background_info}
-            Resolution criteria: {question.resolution_criteria}
-            Fine print: {question.fine_print}
             Units: {question.unit_of_measure or 'Inferred'}
             Research: {research}
             Today: {datetime.now().strftime('%Y-%m-%d')}
@@ -216,19 +240,13 @@ class Yrambot(ForecastBot):
             {lower_msg}
             {upper_msg}
 
-            Formatting:
-            - Never use scientific notation
-            - Start with smaller number, increase
+            Construct a distribution using:
+            - Base rate from historical analogs
+            - Current trend slope
+            - Volatility and uncertainty bandwidth
+            - Known ceiling/floor effects
 
-            Before answering:
-            (a) Time until resolution
-            (b) Outcome if nothing changed
-            (c) Outcome if trend continued
-            (d) Expert/market expectations
-            (e) Low-outcome scenario
-            (f) High-outcome scenario
-
-            The last thing you write is:
+            Output format:
             Percentile 10: X
             Percentile 20: X
             Percentile 40: X
@@ -244,12 +262,9 @@ class Yrambot(ForecastBot):
         return ReasonedPrediction(prediction_value=dist, reasoning=reasoning)
 
     # -----------------------------
-    # Override parent to inject committee + median logic
+    # Override with committee + median (unchanged logic)
     # -----------------------------
     async def _make_prediction(self, question: MetaculusQuestion, research: str):
-        """
-        Override to generate 3 predictions (GPT-5, GPT-4o, Claude) and return median.
-        """
         models = [
             "openrouter/openai/gpt-5",
             "openrouter/openai/gpt-4o",
@@ -259,7 +274,6 @@ class Yrambot(ForecastBot):
         reasonings = []
 
         for model in models:
-            # Temporarily override default LLM
             original_default = self._llms.get("default")
             original_parser = self._llms.get("parser")
             self._llms["default"] = GeneralLlm(model=model)
@@ -277,39 +291,25 @@ class Yrambot(ForecastBot):
                 predictions.append(pred.prediction_value)
                 reasonings.append(pred.reasoning)
             finally:
-                # Restore originals
                 self._llms["default"] = original_default
                 self._llms["parser"] = original_parser
 
-        # Median aggregation
+        # Median aggregation logic (unchanged)
         if isinstance(question, BinaryQuestion):
             median_val = median([p for p in predictions])
             final_pred = ReasonedPrediction(prediction_value=median_val, reasoning=" | ".join(reasonings))
         elif isinstance(question, MultipleChoiceQuestion):
-            # Average then median probabilities per option
             options = question.options
             avg_probs = {}
             for opt in options:
-                # --- FIX 4: UnboundLocalError ---
-                # The broken line `prob_dict = ...` was removed from here.
-                # 'p' was being used before it was defined in the loop below.
-                
-                # Get all probabilities for this option from all model predictions
-                # Use a default of 0 if a model didn't predict this option
                 option_probs = []
-                for p in predictions: # 'p' is defined here
-                    # p.predicted_options is a list of PredictedOption objects
-                    # We convert it to a dict for easy lookup
+                for p in predictions:
                     pred_dict = {po.option_name: po.probability for po in p.predicted_options}
                     option_probs.append(pred_dict.get(opt, 0.0))
-                
                 avg_probs[opt] = median(option_probs)
-            
             total = sum(avg_probs.values())
             if total > 0:
                 avg_probs = {k: v / total for k, v in avg_probs.items()}
-            
-            # --- FIX 3: Correctly construct PredictedOptionList ---
             predicted_options_list = [
                 PredictedOption(option_name=opt, probability=prob)
                 for opt, prob in avg_probs.items()
@@ -318,8 +318,6 @@ class Yrambot(ForecastBot):
                 prediction_value=PredictedOptionList(predicted_options=predicted_options_list),
                 reasoning=" | ".join(reasonings)
             )
-            # -----------------------------------------------------
-
         elif isinstance(question, NumericQuestion):
             target_pts = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
             median_percentiles = []
@@ -335,93 +333,62 @@ class Yrambot(ForecastBot):
             final_dist = NumericDistribution.from_question(median_percentiles, question)
             final_pred = ReasonedPrediction(prediction_value=final_dist, reasoning=" | ".join(reasonings))
         else:
-            # Fallback in case of an issue
             if predictions:
                 final_pred = ReasonedPrediction(prediction_value=predictions[0], reasoning=" | ".join(reasonings))
             else:
-                raise ValueError("No predictions were generated.")
-
+                raise ValueError("No predictions generated.")
         return final_pred
 
-
 # ------------------------------------------------------------------
-# --- FIX 2: MONKEY-PATCH TO FIX PYDANTIC VALIDATOR ---
+# MONKEY-PATCH: Fix PredictedOptionList validator
 # ------------------------------------------------------------------
-# This section dynamically replaces the broken validator in the imported
-# PredictedOptionList class with a new one that correctly handles
-# empty lists (sum=0) and rounding errors (sum=1.02).
-# This avoids needing to edit the library files directly.
-
-# 1. Define the new, correct validator function
 @model_validator(mode='after')
 def _fixed_normalize_probabilities(self: PredictedOptionList):
-    """
-    This is the fixed validator that will replace the original.
-    """
-    # Note: 'self' here is an instance of PredictedOptionList
     if not self.predicted_options:
-        # Case 1: Empty list. Fixes "Sum=0" error.
         return self
-
     sum_ = sum(p.probability for p in self.predicted_options)
-
     if sum_ <= 0:
-        # Case 2: Non-empty list, but sum is zero.
-        logger.warning(
-            f"PredictedOptionList has non-empty list but sum is {sum_}. "
-            f"Probabilities cannot be normalized. Raw options: {self.predicted_options}"
-        )
+        logger.warning(f"PredictedOptionList sum is {sum_}. Cannot normalize. Raw: {self.predicted_options}")
         return self
-
-    # Case 3: Non-empty list with a positive sum.
-    # We will *always* normalize to fix rounding errors (like the "Sum=1.02" error).
     if abs(sum_ - 1.0) > 0.001:
-        # NOTE: The log in your console proves this patch is working.
-        logger.info(
-            f"Normalizing probabilities. Original sum was {sum_}. "
-            f"This fixes potential errors from sums like 1.02 or 0.99."
-        )
+        logger.info(f"Normalizing probabilities. Original sum: {sum_}")
         for option in self.predicted_options:
             option.probability = option.probability / sum_
-    
-    # Ensure no probabilities are negative after normalization (shouldn't happen if sum_ > 0)
     for option in self.predicted_options:
         if option.probability < 0:
             option.probability = 0.0
-
     return self
 
-# 2. Attach the new validator to the imported class, replacing the old one.
-# We re-assign the __pydantic_post_validate__ dunder method,
-# which is what `model_validator(mode='after')` creates.
 PredictedOptionList.__pydantic_post_validate__ = _fixed_normalize_probabilities
-
 logger.info("Monkey-patched 'PredictedOptionList' validator successfully.")
-# --- END OF MONKEY-PATCH ---
-# ------------------------------------------------------------------
-
 
 # -----------------------------
-# MAIN — Tournament Mode
+# MAIN
 # -----------------------------
 if __name__ == "__main__":
-    # Suppress LiteLLM noise
     litellm_logger = logging.getLogger("LiteLLM")
     litellm_logger.setLevel(logging.WARNING)
     litellm_logger.propagate = False
 
-    parser = argparse.ArgumentParser(description="Run Yrambot (GPT-5 + Claude hybrid)")
+    parser = argparse.ArgumentParser(description="Run Yrambot (Bold Superforecaster + Tavily)")
     parser.add_argument(
         "--tournament-ids",
         nargs="+",
         type=str,
-        default=["32813", "metaculus-cup-fall-2025", "market-pulse-25q4", MetaculusApi.CURRENT_MINIBENCH_ID],
+        default=[
+            "32813",
+            "32916",                    # added
+            "ACX2026",                  # added
+            "metaculus-cup-fall-2026",
+            "market-pulse-26q1",        # replaced 25q4 → 26q1
+            MetaculusApi.CURRENT_MINIBENCH_ID
+        ],
     )
     args = parser.parse_args()
 
     bot = Yrambot(
         research_reports_per_question=1,
-        predictions_per_research_report=1,  # Handled via _make_prediction override
+        predictions_per_research_report=1,
         publish_reports_to_metaculus=True,
         skip_previously_forecasted_questions=True,
     )
@@ -433,4 +400,4 @@ if __name__ == "__main__":
         all_reports.extend(reports)
 
     bot.log_report_summary(all_reports)
-    logger.info("✅ Yrambot run completed.")
+    logger.info("✅ Yrambot (Bold + Tavily) run completed.")
