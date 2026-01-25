@@ -23,7 +23,7 @@ from forecasting_tools import (
     BinaryPrediction,
     PredictedOptionList,
     PredictedOption,
-    Reasoned прогноз,
+    ReasonedPrediction,
     clean_indents,
     structure_output,
 )
