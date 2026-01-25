@@ -14,7 +14,7 @@ from forecasting_tools import (
     GeneralLlm,
     MetaculusApi,
     MetaculusQuestion,
-    MultipleChoiceQuestion,
+    MultipleChoiceQBuestion,
     NumericDistribution,
     NumericQuestion,
     Percentile,
@@ -64,6 +64,18 @@ class Yrambot(ForecastBot):
             "forecaster_2": "openrouter/openai/gpt-5.1",
             "summarizer": "openrouter/openai/gpt-4.1-mini",  # Critical fix
         }
+
+    def _scale_numeric_prediction(self, value: float, question: NumericQuestion) -> float:
+        """Scale LLM output based on question context (e.g., billions for revenue)."""
+        text = question.question_text.lower()
+        # Detect if this is a company revenue question (common in Market Pulse)
+        revenue_indicators = ["revenue", "sales", "earnings", "income", "quarterly", "fy202", "financial"]
+        company_tickers = ["AAPL", "AMD", "AMZN", "NVDA", "MSFT", "GOOGL", "META", "TSLA", "NFLX", "ADBE"]
+        
+        if any(ind in text for ind in revenue_indicators) and any(ticker in text for ticker in company_tickers):
+            # Assume output is in billions (e.g., "65.35" → 65.35B = 65,350,000,000)
+            return value * 1e9
+        return value
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._forecast_semaphore:
@@ -149,17 +161,18 @@ class Yrambot(ForecastBot):
         p1 = await self._run_model_forecast("forecaster_1", question, research)
         p2 = await self._run_model_forecast("forecaster_2", question, research)
         
-        # Safety: ensure we have lists
         if not isinstance(p1, list) or not isinstance(p2, list):
             raise ValueError("LLM did not return a list of percentiles")
         
-        # Fallback if insufficient percentiles
         if len(p1) < 2 or len(p2) < 2:
-            logger.warning(f"LLM returned insufficient percentiles (p1:{len(p1)}, p2:{len(p2)}). Using default percentiles.")
+            # Use safe fallback bounds from question attributes
+            low = getattr(question, 'minimum', 0)
+            high = getattr(question, 'maximum', max(1, abs(low) * 2))
+            logger.warning(f"Insufficient percentiles ({len(p1)}/{len(p2)}). Using bounds [{low}, {high}].")
             default_percentiles = [
-                Percentile(percentile=10, value=question.possibilities.get('low', 0)),
-                Percentile(percentile=50, value=(question.possibilities.get('low', 0) + question.possibilities.get('high', 100)) / 2),
-                Percentile(percentile=90, value=question.possibilities.get('high', 100)),
+                Percentile(percentile=10, value=low),
+                Percentile(percentile=50, value=(low + high) / 2),
+                Percentile(percentile=90, value=high),
             ]
             dist = NumericDistribution.from_question(default_percentiles, question)
             return ReasonedPrediction(prediction_value=dist, reasoning=f"### [BOLD NUMERIC - DEFAULTS]\n{research}")
@@ -171,20 +184,34 @@ class Yrambot(ForecastBot):
         
         final_percentiles = []
         for pct in all_percentiles:
-            v1 = p1_map.get(pct, p2_map[pct])  # Prefer p1, fallback to p2
-            v2 = p2_map.get(pct, p1_map[pct])  # Prefer p2, fallback to p1
+            v1 = p1_map.get(pct, p2_map[pct])
+            v2 = p2_map.get(pct, p1_map[pct])
             avg_val = (v1 + v2) / 2
-            final_percentiles.append(Percentile(percentile=pct, value=avg_val))
+            scaled_val = self._scale_numeric_prediction(avg_val, question)
+            final_percentiles.append(Percentile(percentile=pct, value=scaled_val))
         
-        # Final safety check
+        # Final safety: ensure at least 2 percentiles
         if len(final_percentiles) < 2:
-            logger.error("Aligned percentiles still insufficient. This should not happen.")
+            low = getattr(question, 'minimum', 0)
+            high = getattr(question, 'maximum', 100)
             final_percentiles = [
-                Percentile(percentile=10, value=question.possibilities.get('low', 0)),
-                Percentile(percentile=90, value=question.possibilities.get('high', 100)),
+                Percentile(percentile=10, value=low),
+                Percentile(percentile=90, value=high),
             ]
         
-        dist = NumericDistribution.from_question(final_percentiles, question)
+        # Attempt to create distribution, with clamping if needed
+        try:
+            dist = NumericDistribution.from_question(final_percentiles, question)
+        except ValueError as e:
+            logger.warning(f"Validation failed, clamping to bounds: {e}")
+            low = getattr(question, 'minimum', float('-inf'))
+            high = getattr(question, 'maximum', float('inf'))
+            clamped_percentiles = [
+                Percentile(percentile=p.percentile, value=max(low, min(high, p.value)))
+                for p in final_percentiles
+            ]
+            dist = NumericDistribution.from_question(clamped_percentiles, question)
+        
         return ReasonedPrediction(prediction_value=dist, reasoning=f"### [BOLD NUMERIC]\n{research}")
 
 # --- MAIN ---
