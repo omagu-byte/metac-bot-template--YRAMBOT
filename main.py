@@ -14,7 +14,7 @@ from forecasting_tools import (
     GeneralLlm,
     MetaculusApi,
     MetaculusQuestion,
-    MultipleChoiceQBuestion,
+    MultipleChoiceQuestion,
     NumericDistribution,
     NumericQuestion,
     Percentile,
