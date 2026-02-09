@@ -50,7 +50,6 @@ RETRY_MAX_S = float(os.getenv("RETRY_MAX_S", "60.0"))
 
 EXTREMIZE_THRESHOLD = float(os.getenv("EXTREMIZE_THRESHOLD", "0.60"))
 EXTREMIZE_ALPHA = float(os.getenv("EXTREMIZE_ALPHA", "1.35"))
-EXTREMIZE_ALPHA_STRONG = float(os.getenv("EXTREMIZE_ALPHA_STRONG", "1.80"))
 EXTREMIZE_DISPERSION_STD_MAX = float(os.getenv("EXTREMIZE_DISPERSION_STD_MAX", "0.06"))
 
 CROWD_BLEND_WEAK = float(os.getenv("CROWD_BLEND_WEAK", "0.45"))
@@ -64,23 +63,26 @@ REQUIRE_RESEARCH = os.getenv("REQUIRE_RESEARCH", "true").lower() in ("1", "true"
 
 CALIBRATION_LOG_FILE = "forecasting_calibration_log.jsonl"
 
-TAVILY_MAX_CALLS_PER_QUESTION = int(os.getenv("TAVILY_MAX_CALLS_PER_QUESTION", "1"))
+TAVILY_MAX_CALLS_PER_QUESTION = int(os.getenv("TAVILY_MAX_CALLS_PER_QUESTION", "2"))
+TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "6"))
 
 
 def extract_question_id(question: MetaculusQuestion) -> str:
-    try:
-        qid = getattr(question, "id", None)
-        if isinstance(qid, (int, str)) and str(qid).isdigit():
-            return str(qid)
-    except Exception:
-        pass
-    try:
-        url = str(getattr(question, "url", "") or "")
-        m = re.search(r"/questions/(\d+)(?:/|$)", url)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
+    for attr in ("id", "question_id", "questionId"):
+        try:
+            qid = getattr(question, attr, None)
+            if isinstance(qid, (int, str)) and str(qid).isdigit():
+                return str(qid)
+        except Exception:
+            pass
+    for attr in ("url", "page_url", "question_url", "link"):
+        try:
+            url = str(getattr(question, attr, "") or "")
+            m = re.search(r"/questions/(\d+)(?:/|$)", url)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
     try:
         s = str(question)
         m = re.search(r"/questions/(\d+)(?:/|$)", s)
@@ -131,7 +133,7 @@ def is_meaningful_research_text(txt: str) -> bool:
     low = txt.lower()
     if "failed:" in low or "error:" in low or "timeout" in low:
         return False
-    return len(txt.strip()) > 120
+    return len(txt.strip()) > 160
 
 
 def is_research_sufficient(research_by_source: Dict[str, str]) -> bool:
@@ -208,11 +210,6 @@ def derive_numeric_fallback_bounds(question: NumericQuestion, anchor: Optional[f
     return -1e9, 1e9
 
 
-def format_research_block(research_by_source: Dict[str, str]) -> str:
-    txt = (research_by_source or {}).get("tavily", "") or ""
-    return f"--- SOURCE TAVILY ---\n{txt}\n" if txt.strip() else ""
-
-
 def log_forecast_for_calibration(
     question: MetaculusQuestion,
     prediction_value: Any,
@@ -256,7 +253,7 @@ def backoff_sleep(attempt: int) -> None:
     time.sleep(base + jitter)
 
 
-def build_comment(
+def build_reasoning_only(
     question: MetaculusQuestion,
     forecast_text: str,
     base_rate_text: str,
@@ -264,26 +261,19 @@ def build_comment(
     searchers_used: List[str],
     models_used: List[str],
 ) -> str:
-    qtxt = getattr(question, "question_text", "").strip()
-    qid = extract_question_id(question)
     today = datetime.utcnow().strftime("%Y-%m-%d")
     searchers = ", ".join(searchers_used) if searchers_used else "None"
     models = ", ".join(models_used) if models_used else "Unknown"
     return clean_indents(f"""
-    ## Yrambot Forecast (Q{qid})
-    **Date (UTC):** {today}
+    Date (UTC): {today}
+    Forecast: {forecast_text}
+    Base rate / anchor: {base_rate_text}
 
-    **Question:** {qtxt}
-
-    **Forecast:** {forecast_text}
-
-    **Anchor / base rate:** {base_rate_text}
-
-    **How this was arrived at:**
+    How the forecast was arrived at:
     {how_text}
 
-    **Searchers used:** {searchers}
-    **Models used:** {models}
+    Search: {searchers}
+    Model: {models}
     """).strip()
 
 
@@ -326,6 +316,7 @@ class Yrambot(ForecastBot):
             "parser": "openrouter/openai/gpt-4.1-mini",
             "researcher": "openrouter/openai/gpt-5.2",
             "summarizer": "openrouter/openai/gpt-4.1-mini",
+            "llm_web_search": "openrouter/openai/gpt-5.2",
         }
 
     def __init__(self, *args, **kwargs):
@@ -334,23 +325,38 @@ class Yrambot(ForecastBot):
         self._research_meta: Dict[str, Dict[str, Any]] = {}
         self._tavily_calls: Dict[str, int] = {}
 
+    def _metaculus_context_block(self, question: MetaculusQuestion) -> str:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        qtxt = (getattr(question, "question_text", "") or "").strip()
+        rc = (getattr(question, "resolution_criteria", "") or "").strip()
+        bg = (getattr(question, "background_info", "") or "").strip()
+        url = (getattr(question, "url", "") or getattr(question, "page_url", "") or "").strip()
+        return clean_indents(f"""
+        --- SOURCE METACULUS ({today}) ---
+        Question: {qtxt}
+        URL: {url or "N/A"}
+        Resolution criteria: {rc or "N/A"}
+        Background: {bg or "N/A"}
+        """).strip()
+
     def call_tavily(self, query: str) -> str:
         if not self.tavily_client or not getattr(self.tavily_client, "api_key", None):
             return ""
         try:
-            response = self.tavily_client.search(query=query, search_depth="advanced", max_results=6)
+            response = self.tavily_client.search(query=query, search_depth="advanced", max_results=TAVILY_MAX_RESULTS)
             results = response.get("results", []) or []
             lines: List[str] = []
-            for c in results[:6]:
+            for c in results[:TAVILY_MAX_RESULTS]:
                 title = (c.get("title") or "").strip()
                 content = (c.get("content") or "").strip()
                 url = (c.get("url") or "").strip()
                 published = (c.get("published_date") or c.get("publishedDate") or "").strip()
                 if title or content:
+                    snippet = content[:520].strip()
                     lines.append(
                         f"- Title: {title or 'N/A'}\n"
                         f"  Published: {published or 'N/A'}\n"
-                        f"  Snippet: {content[:420]}\n"
+                        f"  Snippet: {snippet or 'N/A'}\n"
                         f"  Source: {url or 'N/A'}"
                     )
             return "\n".join(lines).strip()
@@ -360,8 +366,8 @@ class Yrambot(ForecastBot):
     async def _expand_queries_with_llm(self, question_text: str) -> List[str]:
         researcher_llm = self.get_llm("researcher", "llm")
         prompt = clean_indents(f"""
-        Generate 4 concise web search queries for this forecasting question.
-        Include: key entities, metrics, and "latest" phrasing.
+        Generate 6 concise web search queries for this forecasting question.
+        Mix: entities, resolution-criteria terms, and "latest update" phrasing.
         Output JSON ONLY: {{"queries":["...","..."]}}
 
         Question: {question_text}
@@ -378,9 +384,41 @@ class Yrambot(ForecastBot):
                 if k not in seen:
                     seen.add(k)
                     out.append(q)
-            return out[:5]
+            return out[:6]
         except Exception:
             return [question_text.strip()]
+
+    async def _llm_web_search_support(self, question_text: str, tavily_text: str) -> str:
+        llm = self.get_llm("llm_web_search", "llm")
+        prompt = clean_indents(f"""
+        You are a web-research assistant for Yrambot. You MUST NOT invent sources.
+        Your job is to improve Tavily research quality by proposing:
+        - 3 high-impact follow-up queries
+        - 3 key entities/keywords to include
+        - 3 "must-check" source types (e.g., gov/central bank filings, earnings calls, agency reports)
+        Output JSON ONLY:
+        {{
+          "followup_queries": ["...","...","..."],
+          "keywords": ["...","...","..."],
+          "source_types": ["...","...","..."],
+          "quality_gap": "one sentence"
+        }}
+
+        Forecasting question:
+        {question_text}
+
+        Current Tavily results (may be incomplete):
+        {tavily_text}
+        """).strip()
+        raw = await with_timeout(llm.invoke(prompt), 35, "llm_web_search_support")
+        try:
+            data = json.loads(raw)
+            qs = [str(x).strip() for x in data.get("followup_queries", []) if str(x).strip()]
+            if qs:
+                return json.dumps(data)
+        except Exception:
+            pass
+        return ""
 
     async def _run_research_impl(self, question: MetaculusQuestion) -> Tuple[str, Dict[str, str], List[str]]:
         async with self._concurrency_limiter:
@@ -390,49 +428,103 @@ class Yrambot(ForecastBot):
             qid = extract_question_id(question)
             self._tavily_calls.setdefault(qid, 0)
 
+            metaculus_block = self._metaculus_context_block(question)
+
             expanded_queries = await self._expand_queries_with_llm(qtxt)
 
             tav_parts: List[str] = []
 
-            query_to_use = expanded_queries[0] if expanded_queries else qtxt
+            if not self.tavily_client:
+                research_by_source = {"metaculus": metaculus_block, "tavily": ""}
+                if REQUIRE_RESEARCH and not is_research_sufficient(research_by_source):
+                    raise RuntimeError(f"Insufficient research for Q{qid}; refusing to forecast.")
+                searchers_used = ["metaculus"]
+                synthesized = await self._synthesize_research(question, research_by_source, searchers_used)
+                return synthesized, research_by_source, searchers_used
+
+            query0 = expanded_queries[0] if expanded_queries else qtxt
             if self._tavily_calls[qid] < TAVILY_MAX_CALLS_PER_QUESTION:
-                tav = await with_timeout(asyncio.to_thread(self.call_tavily, query_to_use), RESEARCH_TIMEOUT_S, "tavily_0")
+                tav0 = await with_timeout(asyncio.to_thread(self.call_tavily, query0), RESEARCH_TIMEOUT_S, "tavily_0")
                 self._tavily_calls[qid] += 1
-                if is_meaningful_research_text(tav):
-                    tav_parts.append(f"## Query: {query_to_use}\n{tav}")
+                if is_meaningful_research_text(tav0):
+                    tav_parts.append(f"## Query: {query0}\n{tav0}")
 
             tav_all = "\n\n".join(tav_parts).strip()
-            research_by_source = {"tavily": tav_all}
-            searchers_used = ["tavily"] if is_meaningful_research_text(tav_all) else []
+
+            if not is_meaningful_research_text(tav_all) and self._tavily_calls[qid] < TAVILY_MAX_CALLS_PER_QUESTION:
+                support_json = await self._llm_web_search_support(qtxt, tav_all or "(empty)")
+                followups: List[str] = []
+                try:
+                    data = json.loads(support_json) if support_json else {}
+                    followups = [str(x).strip() for x in data.get("followup_queries", []) if str(x).strip()]
+                except Exception:
+                    followups = []
+
+                query1 = followups[0] if followups else (expanded_queries[1] if len(expanded_queries) > 1 else qtxt)
+                tav1 = await with_timeout(asyncio.to_thread(self.call_tavily, query1), RESEARCH_TIMEOUT_S, "tavily_1")
+                self._tavily_calls[qid] += 1
+                if is_meaningful_research_text(tav1):
+                    tav_parts.append(f"## Query: {query1}\n{tav1}")
+                tav_all = "\n\n".join(tav_parts).strip()
+
+            research_by_source = {
+                "metaculus": metaculus_block,
+                "tavily": tav_all,
+            }
+
+            searchers_used = ["metaculus"] + (["tavily"] if is_meaningful_research_text(tav_all) else [])
 
             if REQUIRE_RESEARCH and not is_research_sufficient(research_by_source):
                 raise RuntimeError(f"Insufficient research for Q{qid}; refusing to forecast.")
 
-            raw_block = format_research_block(research_by_source)
-
-            researcher_llm = self.get_llm("researcher", "llm")
-            synth_prompt = clean_indents(f"""
-            Summarize evidence for forecasting.
-            - Prefer RECENT items; include dates when present.
-            - Each bullet ends with [TAVILY].
-            - Include a short Signposts section (what to watch).
-
-            Question: {qtxt}
-
-            Raw research:
-            {raw_block}
-
-            Output (plain text, <=2400 chars):
-            - Key facts (...)
-            - Uncertainties (...)
-            - Signposts (...)
-            """).strip()
-            synthesized = await with_timeout(researcher_llm.invoke(synth_prompt), LLM_TIMEOUT_S, "research_synthesis")
-            synthesized = (synthesized or "").strip()
-            if REQUIRE_RESEARCH and not synthesized:
-                raise RuntimeError(f"Empty synthesis for Q{qid}; refusing to forecast.")
+            synthesized = await self._synthesize_research(question, research_by_source, searchers_used)
+            if REQUIRE_RESEARCH and not is_meaningful_research_text(synthesized):
+                raise RuntimeError(f"Insufficient synthesized research for Q{qid}; refusing to forecast.")
 
             return synthesized, research_by_source, searchers_used
+
+    async def _synthesize_research(
+        self,
+        question: MetaculusQuestion,
+        research_by_source: Dict[str, str],
+        searchers_used: List[str],
+    ) -> str:
+        researcher_llm = self.get_llm("researcher", "llm")
+        qtxt = (getattr(question, "question_text", "") or "").strip()
+
+        met = (research_by_source.get("metaculus") or "").strip()
+        tav = (research_by_source.get("tavily") or "").strip()
+
+        raw_block = clean_indents(f"""
+        {met}
+
+        --- SOURCE TAVILY ---
+        {tav if tav else "N/A"}
+        """).strip()
+
+        prompt = clean_indents(f"""
+        Summarize evidence for forecasting (Yrambot).
+        Requirements:
+        - Prefer RECENT items; include dates and numbers where available.
+        - Use only information present in the provided sources block.
+        - End each bullet with [METACULUS] or [TAVILY] (or both).
+        - Include:
+          - Base rate / reference class
+          - Key updates (2-6)
+          - Uncertainties
+          - Signposts (what would change the forecast)
+
+        Question:
+        {qtxt}
+
+        Sources block:
+        {raw_block}
+
+        Output plain text (<=2400 chars).
+        """).strip()
+
+        synthesized = await with_timeout(researcher_llm.invoke(prompt), LLM_TIMEOUT_S, "research_synthesis")
+        return (synthesized or "").strip()
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         synthesized, research_by_source, searchers_used = await self._run_research_impl(question)
@@ -451,8 +543,10 @@ class Yrambot(ForecastBot):
         return synthesized
 
     async def _single_forecast(self, question, research: str, model_override: str = None):
-        if REQUIRE_RESEARCH and (not research or len(research.strip()) < 80):
-            raise RuntimeError(f"Missing/insufficient research for Q{extract_question_id(question)}; refusing to forecast.")
+        qid = extract_question_id(question)
+        if REQUIRE_RESEARCH and (not research or len(research.strip()) < 120):
+            raise RuntimeError(f"Missing/insufficient research for Q{qid}; refusing to forecast.")
+
         llm = GeneralLlm(model=model_override) if model_override else self.get_llm("default", "llm")
         parser_llm = self.get_llm("parser", "llm")
         summarizer_llm = self.get_llm("summarizer", "llm")
@@ -465,16 +559,16 @@ class Yrambot(ForecastBot):
             else (f"Community anchor (scalar): {base_rate:,.6g}" if isinstance(base_rate, (int, float)) else "No reliable community anchor.")
         )
 
-        good_judgment = clean_indents("""
-        Good Judgment rules:
-        - Outside view first (base rate), then inside view update with evidence.
+        gj = clean_indents("""
+        Rules:
+        - Outside view first (base rate), then inside view updates from evidence.
         - Weight evidence by recency + credibility; discount stale/noisy.
-        - Keep uncertainty calibrated (avoid needless overconfidence).
+        - Avoid unjustified certainty; extremes need strong evidence.
         """).strip()
 
         if isinstance(question, BinaryQuestion):
             prompt = clean_indents(f"""
-            {good_judgment}
+            {gj}
 
             Question: {question.question_text}
             Resolution criteria: {question.resolution_criteria}
@@ -494,7 +588,7 @@ class Yrambot(ForecastBot):
 
         if isinstance(question, MultipleChoiceQuestion):
             prompt = clean_indents(f"""
-            {good_judgment}
+            {gj}
 
             Question: {question.question_text}
             Options (exact): {question.options}
@@ -534,8 +628,9 @@ class Yrambot(ForecastBot):
         if isinstance(question, NumericQuestion):
             lower_ref = getattr(question, "lower_bound", None) or getattr(question, "nominal_lower_bound", None)
             upper_ref = getattr(question, "upper_bound", None) or getattr(question, "nominal_upper_bound", None)
+
             prompt = clean_indents(f"""
-            {good_judgment}
+            {gj}
 
             Question: {question.question_text}
             Units: {question.unit_of_measure or 'Infer from context'}
@@ -550,12 +645,12 @@ class Yrambot(ForecastBot):
             Today (UTC): {today_utc}
 
             NUMERIC OUTPUT RULES:
-            - Output MUST be valid JSON (no backticks).
+            - Output MUST be valid JSON ONLY (no backticks, no commentary).
             - Use ONLY numeric literals (no arithmetic like 0.5-0.25).
-            - Percentiles MUST be in [0,1], strictly increasing.
+            - Percentile in [0,1], strictly increasing.
             - Include these percentiles exactly: 0.1, 0.2, 0.4, 0.6, 0.8, 0.9.
 
-            Output JSON ONLY: a JSON list:
+            Output JSON ONLY:
             [
               {{"percentile":0.1,"value":...}},
               {{"percentile":0.2,"value":...}},
@@ -565,6 +660,7 @@ class Yrambot(ForecastBot):
               {{"percentile":0.9,"value":...}}
             ]
             """).strip()
+
             raw = await with_timeout(llm.invoke(prompt), LLM_TIMEOUT_S, "num_llm")
 
             try:
@@ -572,12 +668,13 @@ class Yrambot(ForecastBot):
             except Exception:
                 fixed = sanitize_numeric_json(str(raw))
                 repair_prompt = clean_indents(f"""
-                Rewrite the following into valid JSON ONLY for type list[Percentile].
+                Convert the following into valid JSON ONLY for type list[Percentile].
                 Rules:
                 - Only numeric literals
-                - Percentile in [0,1]
-                - No arithmetic expressions
-                - Output only the JSON list
+                - percentile in [0,1]
+                - strictly increasing percentiles
+                - no arithmetic expressions
+                - output only the JSON list
 
                 Text:
                 {fixed}
@@ -627,7 +724,7 @@ class Yrambot(ForecastBot):
         agree = True
 
         p_final = p_agg
-        if agree and should_extremize(p_agg, EXTREMIZE_THRESHOLD):
+        if agree and should_extremize(p_agg, EXTREMIZE_THRESHOLD) and p_std <= EXTREMIZE_DISPERSION_STD_MAX:
             p_final = extremize_probability(p_agg, alpha=EXTREMIZE_ALPHA)
 
         if isinstance(base, (int, float)):
@@ -637,17 +734,24 @@ class Yrambot(ForecastBot):
         meta = self._research_meta.get(qid, {})
         searchers_used = meta.get("searchers_used", []) if isinstance(meta.get("searchers_used", None), list) else []
 
-        comment = build_comment(
+        how = clean_indents(f"""
+        - Used synthesized research summary (dates + key signals) to update from base rate.
+        - Single-model forecast (gpt-5.2) with calibration guardrails:
+          - optional extremization when sufficiently away from 50%
+          - optional blend with Metaculus community anchor when available.
+        """).strip()
+
+        reasoning = build_reasoning_only(
             question,
             forecast_text=f"{p_final:.1%}",
             base_rate_text=base_rate_text,
-            how_text=f"- Single-model (gpt-5.2) + optional extremization; std={p_std:.3f}\n- Used Tavily research + base rate anchor.",
+            how_text=how,
             searchers_used=searchers_used,
             models_used=[model],
         )
-        log_forecast_for_calibration(question, p_final, comment, [model], True, searchers_used)
+        log_forecast_for_calibration(question, p_final, reasoning, [model], True, searchers_used)
         time.sleep(PUBLISH_SLEEP_S)
-        return ReasonedPrediction(prediction_value=p_final, reasoning=comment)
+        return ReasonedPrediction(prediction_value=p_final, reasoning=reasoning)
 
     async def _run_forecast_on_multiple_choice(self, question: MultipleChoiceQuestion, research: str) -> ReasonedPrediction[PredictedOptionList]:
         model = "openrouter/openai/gpt-5.2"
@@ -664,17 +768,23 @@ class Yrambot(ForecastBot):
         meta = self._research_meta.get(qid, {})
         searchers_used = meta.get("searchers_used", []) if isinstance(meta.get("searchers_used", None), list) else []
 
-        comment = build_comment(
+        how = clean_indents(f"""
+        - Used synthesized research summary to allocate probability mass across options.
+        - Enforced normalization (sum to 1) and coverage (all options included once).
+        - Single-model forecast (gpt-5.2).
+        """).strip()
+
+        reasoning = build_reasoning_only(
             question,
             forecast_text=", ".join([f"{x.option_name}: {x.probability:.1%}" for x in out.predicted_options]),
-            base_rate_text="(see community chart on Metaculus)",
-            how_text="- Single-model (gpt-5.2) normalized probabilities.\n- Used Tavily research.",
+            base_rate_text="Metaculus community chart (qualitative anchor)",
+            how_text=how,
             searchers_used=searchers_used,
             models_used=[model],
         )
-        log_forecast_for_calibration(question, [x.probability for x in out.predicted_options], comment, [model], True, searchers_used)
+        log_forecast_for_calibration(question, [x.probability for x in out.predicted_options], reasoning, [model], True, searchers_used)
         time.sleep(PUBLISH_SLEEP_S)
-        return ReasonedPrediction(prediction_value=out, reasoning=comment)
+        return ReasonedPrediction(prediction_value=out, reasoning=reasoning)
 
     async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
         model = "openrouter/openai/gpt-5.2"
@@ -689,8 +799,14 @@ class Yrambot(ForecastBot):
             center = float(base) if isinstance(base, (int, float)) else (lb + ub) / 2.0
             width = (ub - lb) * 0.30
             target_ps = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
-            vals = [center - 0.9 * width, center - 0.5 * width, center - 0.15 * width,
-                    center + 0.15 * width, center + 0.5 * width, center + 0.9 * width]
+            vals = [
+                center - 0.9 * width,
+                center - 0.5 * width,
+                center - 0.15 * width,
+                center + 0.15 * width,
+                center + 0.5 * width,
+                center + 0.9 * width,
+            ]
             vals = [max(lb, min(ub, v)) for v in vals]
             validated = enforce_numeric_constraints([Percentile(p, v) for p, v in zip(target_ps, vals)], question)
             dist = NumericDistribution.from_question(validated, question)
@@ -705,17 +821,23 @@ class Yrambot(ForecastBot):
         meta = self._research_meta.get(qid, {})
         searchers_used = meta.get("searchers_used", []) if isinstance(meta.get("searchers_used", None), list) else []
 
-        comment = build_comment(
+        how = clean_indents(f"""
+        - Produced a percentile forecast from synthesized research, anchored by any available community scalar.
+        - Parser-safe numeric output with repair step (eliminates arithmetic in JSON).
+        - Enforced bounds and monotonic percentiles.
+        """).strip()
+
+        reasoning = build_reasoning_only(
             question,
             forecast_text=", ".join([f"p{int(p.percentile*100)}={p.value:,.6g}" for p in validated]),
             base_rate_text=base_rate_text,
-            how_text="- Single-model (gpt-5.2); enforced constraints; parser-safe numeric repair.\n- Used Tavily research + base rate anchor where available.",
+            how_text=how,
             searchers_used=searchers_used,
             models_used=[model],
         )
-        log_forecast_for_calibration(question, [p.value for p in validated], comment, [model], True, searchers_used)
+        log_forecast_for_calibration(question, [p.value for p in validated], reasoning, [model], True, searchers_used)
         time.sleep(PUBLISH_SLEEP_S)
-        return ReasonedPrediction(prediction_value=dist, reasoning=comment)
+        return ReasonedPrediction(prediction_value=dist, reasoning=reasoning)
 
 
 if __name__ == "__main__":
