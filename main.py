@@ -738,18 +738,19 @@ class Yrambot(ForecastBot):
         time.sleep(PUBLISH_SLEEP_S)
         return ReasonedPrediction(prediction_value=out, reasoning=reasoning)
 
-    async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
+async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
         profile, strategy = await self._get_profile_and_strategy(question, "numeric")
         qid, base = extract_question_id(question), safe_community_prediction(question)
 
-        try: validated, _ = await self._forecast_numeric_core(question, research, profile, strategy)
-      except Exception:
+        try: 
+            validated, _ = await self._forecast_numeric_core(question, research, profile, strategy)
+        except Exception:
             lb, ub = derive_numeric_fallback_bounds(question, base)
             center = float(base) if isinstance(base, (int, float)) else (lb + ub) / 2.0
             width  = (ub - lb) * 0.30
             vals   = [max(lb, min(ub, v)) for v in [center - 0.9 * width, center - 0.5 * width, center - 0.15 * width, center + 0.15 * width, center + 0.5 * width, center + 0.9 * width]]
             
-            # FIX: Added `percentile=` and `value=` keywords inside the list comprehension
+            # Pydantic keyword fix applied here
             validated = enforce_numeric_constraints([Percentile(percentile=p, value=v) for p, v in zip([0.1, 0.2, 0.4, 0.6, 0.8, 0.9], vals)], question)
 
         if "market-pulse" in (self._active_tournament or ""):
