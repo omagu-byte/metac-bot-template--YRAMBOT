@@ -776,3 +776,19 @@ if __name__ == "__main__":
     try:
         all_reports = []
         for tid in args.tournament_ids:
+            logger.info(f"Forecasting on tournament: {tid}")
+            for attempt in range(RETRY_MAX):
+                try:
+                    reports = asyncio.run(bot.forecast_on_tournament(tid, return_exceptions=True))
+                    all_reports.extend(reports)
+                    break
+                except Exception as e:
+                    if any(x in str(e).lower() for x in ("too many requests", "cloudflare", "1015", "429")):
+                        logger.error(f"Rate-limited on tournament {tid} (attempt {attempt + 1}/{RETRY_MAX}): {e}")
+                        backoff_sleep(attempt)
+                        continue
+                    raise
+            time.sleep(TOURNAMENT_SLEEP_S)
+        bot.log_report_summary(all_reports)
+    except Exception as e: 
+        logger.error(f"Critical error: {e}", exc_info=True)
