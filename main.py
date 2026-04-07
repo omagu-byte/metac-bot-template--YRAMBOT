@@ -775,4 +775,4 @@ if __name__ == "__main__":
 
     try:
         all_reports = []
-        for tid in args.tournament_ids
+        for tid in args.tournament_ids:
