@@ -66,7 +66,7 @@ EXTREMIZE_ENABLED          = os.getenv("EXTREMIZE_ENABLED", "true").lower() in (
 EXTREMIZE_FACTOR           = float(os.getenv("EXTREMIZE_FACTOR", "1.45"))
 EXTREMIZE_FLOOR            = float(os.getenv("EXTREMIZE_FLOOR", "0.02"))
 EXTREMIZE_CEIL             = float(os.getenv("EXTREMIZE_CEIL", "0.98"))
-MINIBENCH_EXTREMIZE_FACTOR = float(os.getenv("MINIBENCH_EXTREMIZE_FACTOR", "4.00")) # Aggressive Anti-Average
+MINIBENCH_EXTREMIZE_FACTOR = float(os.getenv("MINIBENCH_EXTREMIZE_FACTOR", "4.00"))
 CROWD_BLEND_MIXED          = float(os.getenv("CROWD_BLEND_MIXED", "0.65"))
 MIN_P                      = float(os.getenv("MIN_P", "0.01"))
 MAX_P                      = float(os.getenv("MAX_P", "0.99"))
@@ -274,7 +274,7 @@ class ValidationRecord:
 
 
 class ForecastValidator:
-    LOW_CONFIDENCE_THRESHOLD = 0.65 # Raised for selective forecasting
+    LOW_CONFIDENCE_THRESHOLD = 0.65
 
     def __init__(self, db_path: str = "yrambot_validation.db"):
         self._db_path = db_path
@@ -434,12 +434,20 @@ def enforce_numeric_constraints(percentiles: List[Percentile], question: Numeric
     if upper is None: upper = getattr(question, "nominal_upper_bound", None)
     if lower is None: lower = -np.inf
     if upper is None: upper = np.inf
-    bounded = [Percentile(float(p.percentile), float(max(lower, min(upper, p.value)))) for p in percentiles]
+
+    # FIX: Always use keyword arguments for Pydantic BaseModel
+    bounded = [
+        Percentile(percentile=float(p.percentile), value=float(max(lower, min(upper, p.value))))
+        for p in percentiles
+    ]
+
     srt  = sorted(bounded, key=lambda x: x.percentile)
     vals = [p.value for p in srt]
     for i in range(1, len(vals)):
         if vals[i] < vals[i - 1]: vals[i] = vals[i - 1]
-    return [Percentile(srt[i].percentile, float(vals[i])) for i in range(len(vals))]
+
+    # FIX: Always use keyword arguments for Pydantic BaseModel
+    return [Percentile(percentile=srt[i].percentile, value=float(vals[i])) for i in range(len(vals))]
 
 def derive_numeric_fallback_bounds(question: NumericQuestion, anchor: Optional[float]) -> Tuple[float, float]:
     lb = getattr(question, "lower_bound", None)
@@ -456,12 +464,12 @@ def derive_numeric_fallback_bounds(question: NumericQuestion, anchor: Optional[f
 
 def log_forecast_for_calibration(question, prediction_value, reasoning, models_used, research_used, searchers_used):
     entry = {
-        "timestamp":            datetime.utcnow().isoformat(),
-        "question_id":          extract_question_id(question),
-        "question_type":        question.__class__.__name__,
-        "prediction_value":     prediction_value,
-        "models_used":          models_used,
-        "research_used":        research_used,
+        "timestamp":        datetime.utcnow().isoformat(),
+        "question_id":      extract_question_id(question),
+        "question_type":    question.__class__.__name__,
+        "prediction_value": prediction_value,
+        "models_used":      models_used,
+        "research_used":    research_used,
     }
     try:
         with open(CALIBRATION_LOG_FILE, "a") as f: f.write(json.dumps(entry) + "\n")
@@ -573,7 +581,10 @@ class Yrambot(ForecastBot):
 
     def _metaculus_context_block(self, question: MetaculusQuestion) -> str:
         today = datetime.utcnow().strftime("%Y-%m-%d")
-        qtxt, rc, bg, url = (getattr(question, "question_text", "") or "").strip(), (getattr(question, "resolution_criteria", "") or "").strip(), (getattr(question, "background_info", "") or "").strip(), (getattr(question, "url", "") or getattr(question, "page_url", "") or "").strip()
+        qtxt = (getattr(question, "question_text", "") or "").strip()
+        rc   = (getattr(question, "resolution_criteria", "") or "").strip()
+        bg   = (getattr(question, "background_info", "") or "").strip()
+        url  = (getattr(question, "url", "") or getattr(question, "page_url", "") or "").strip()
         return f"[Metaculus Context — {today}]\nQuestion: {qtxt}\nURL: {url or 'N/A'}\nResolution criteria: {rc or 'N/A'}\nBackground: {bg or 'N/A'}"
 
     async def _plan_queries(self, question: MetaculusQuestion, profile: QuestionProfile, question_type: str) -> List[str]:
@@ -608,12 +619,11 @@ class Yrambot(ForecastBot):
                 cached = await self._research_cache.get(url)
                 if cached: return cached
 
-            q_type = "numeric" if isinstance(question, NumericQuestion) else "multiple_choice" if isinstance(question, MultipleChoiceQuestion) else "binary"
+            q_type   = "numeric" if isinstance(question, NumericQuestion) else "multiple_choice" if isinstance(question, MultipleChoiceQuestion) else "binary"
             profile  = await self._analyser.classify(question)
             strategy = ModellingStrategy.select(profile, q_type)
             qid      = extract_question_id(question)
 
-            # LIVE FINANCIAL DATA INJECTION
             fin_data = ""
             is_finance = "market-pulse" in (self._active_tournament or "") or profile.domain in ("finance", "economics")
             if is_finance and YFINANCE_AVAILABLE:
@@ -646,7 +656,7 @@ class Yrambot(ForecastBot):
         if meta.get("profile") and meta.get("strategy"): return meta["profile"], meta["strategy"]
         profile  = await self._analyser.classify(question)
         return profile, ModellingStrategy.select(profile, question_type)
-        
+
     def _selective_confidence_gate(self, qid: str, p_final: Any, profile: QuestionProfile, research: str):
         if str(self._active_tournament) in SELECTIVE_TOURNAMENTS:
             confidence = self._validator.compute_confidence(p_final, profile, len(research))
@@ -682,22 +692,26 @@ class Yrambot(ForecastBot):
                   f"Research summary:\n{research}\n"
                   'Return JSON array ONLY: [{"percentile":0.1,"value":<num>}, {"percentile":0.2,"value":<num>}, {"percentile":0.4,"value":<num>}, {"percentile":0.6,"value":<num>}, {"percentile":0.8,"value":<num>}, {"percentile":0.9,"value":<num>}]')
         raw = await with_timeout(self.get_llm("default", "llm").invoke(prompt), LLM_TIMEOUT_S, "num_llm")
-        try: percentile_list = await structure_output(raw, list[Percentile], model=self.get_llm("parser", "llm"))
+        try:
+            percentile_list = await structure_output(raw, list[Percentile], model=self.get_llm("parser", "llm"))
         except Exception:
             repaired = await with_timeout(self.get_llm("summarizer", "llm").invoke(f"Convert to valid JSON array of Percentile objects.\n{sanitize_numeric_json(str(raw))}"), LLM_TIMEOUT_S, "num_repair")
             percentile_list = await structure_output(repaired, list[Percentile], model=self.get_llm("parser", "llm"))
-        validated = enforce_numeric_constraints(interpolate_missing_percentiles(percentile_list, [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]), question)
+        validated = enforce_numeric_constraints(
+            interpolate_missing_percentiles(percentile_list, [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]),
+            question
+        )
         return validated, str(raw)
 
     async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
         profile, strategy = await self._get_profile_and_strategy(question, "binary")
         qid, base = extract_question_id(question), safe_community_prediction(question)
-        
+
         try: raw_p, _ = await self._forecast_binary_core(question, research, profile, strategy)
         except Exception as e: raw_p = clamp01(float(base) if isinstance(base, (int, float)) else 0.5)
 
         p_final = self._extremize(raw_p)
-        
+
         if not self._is_minibench() and isinstance(base, (int, float)):
             p_final = clamp01(CROWD_BLEND_MIXED * p_final + (1.0 - CROWD_BLEND_MIXED) * float(base))
             blend_note = f"Community anchor blended at weight {CROWD_BLEND_MIXED}."
@@ -705,11 +719,10 @@ class Yrambot(ForecastBot):
             blend_note = "Crowd blending disabled (Minibench Anti-Average Engine active)." if self._is_minibench() else "No community anchor available."
 
         self._selective_confidence_gate(qid, p_final, profile, research)
-
         self._validator.validate(question, profile, strategy, p_final, research)
         methodology = f"Superforecasting protocol with {strategy} framework.\n{blend_note}"
         reasoning = build_reasoning_block(question, f"{p_final:.1%}", f"{base:.1%}" if isinstance(base, (int,float)) else "None", methodology, strategy, profile, self._research_meta.get(qid, {}).get("searchers_used", []), self._is_minibench(), self._ext().factor)
-        
+
         log_forecast_for_calibration(question, p_final, reasoning, ["Ensemble"], True, self._research_meta.get(qid, {}).get("searchers_used", []))
         time.sleep(PUBLISH_SLEEP_S)
         return ReasonedPrediction(prediction_value=p_final, reasoning=reasoning)
@@ -726,26 +739,35 @@ class Yrambot(ForecastBot):
             total = sum(extremized.values()) or 1.0
             out = PredictedOptionList(predicted_options=[PredictedOption(option_name=opt, probability=extremized[opt] / total) for opt in question.options])
 
-        self._selective_confidence_gate(qid, 0.5, profile, research) # Use 0.5 placeholder for MC signal
+        self._selective_confidence_gate(qid, 0.5, profile, research)
         self._validator.validate(question, profile, strategy, [o.probability for o in out.predicted_options], research)
-        
+
         methodology = f"Superforecasting protocol with {strategy} framework.\n{'Per-option logit extremization applied.' if self._is_minibench() else 'Standard distribution.'}"
         reasoning = build_reasoning_block(question, ", ".join([f"{x.option_name}: {x.probability:.1%}" for x in out.predicted_options]), "Qualitative anchor", methodology, strategy, profile, self._research_meta.get(qid, {}).get("searchers_used", []), self._is_minibench(), self._ext().factor)
-        
+
         time.sleep(PUBLISH_SLEEP_S)
         return ReasonedPrediction(prediction_value=out, reasoning=reasoning)
 
+    # FIX: Method is now correctly indented inside the Yrambot class
     async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
         profile, strategy = await self._get_profile_and_strategy(question, "numeric")
         qid, base = extract_question_id(question), safe_community_prediction(question)
 
-        try: validated, _ = await self._forecast_numeric_core(question, research, profile, strategy)
+        try:
+            validated, _ = await self._forecast_numeric_core(question, research, profile, strategy)
         except Exception:
             lb, ub = derive_numeric_fallback_bounds(question, base)
             center = float(base) if isinstance(base, (int, float)) else (lb + ub) / 2.0
             width  = (ub - lb) * 0.30
-            vals   = [max(lb, min(ub, v)) for v in [center - 0.9 * width, center - 0.5 * width, center - 0.15 * width, center + 0.15 * width, center + 0.5 * width, center + 0.9 * width]]
-            validated = enforce_numeric_constraints([Percentile(p, v) for p, v in zip([0.1, 0.2, 0.4, 0.6, 0.8, 0.9], vals)], question)
+            vals   = [max(lb, min(ub, v)) for v in [
+                center - 0.9 * width, center - 0.5 * width, center - 0.15 * width,
+                center + 0.15 * width, center + 0.5 * width, center + 0.9 * width
+            ]]
+            # FIX: Use keyword arguments for Pydantic BaseModel
+            validated = enforce_numeric_constraints(
+                [Percentile(percentile=p, value=v) for p, v in zip([0.1, 0.2, 0.4, 0.6, 0.8, 0.9], vals)],
+                question
+            )
 
         # Scale percentiles if they are way below the lower bound
         lower = getattr(question, 'lower_bound', None) or getattr(question, 'nominal_lower_bound', None)
@@ -761,10 +783,17 @@ class Yrambot(ForecastBot):
         self._selective_confidence_gate(qid, 0.5, profile, research)
         dist = NumericDistribution.from_question(validated, question)
         self._validator.validate(question, profile, strategy, dist, research)
-        
+
         methodology = f"Superforecasting protocol with {strategy} framework.\n{'Market-Pulse Tail Fattening applied to P10/P90.' if 'market-pulse' in (self._active_tournament or '') else 'Standard distribution.'}"
-        reasoning = build_reasoning_block(question, ", ".join([f"p{int(p.percentile * 100)}={p.value:,.6g}" for p in validated]), f"{base:,.4g}" if isinstance(base, (int, float)) else "None", methodology, strategy, profile, self._research_meta.get(qid, {}).get("searchers_used", []), self._is_minibench(), self._ext().factor)
-        
+        reasoning = build_reasoning_block(
+            question,
+            ", ".join([f"p{int(p.percentile * 100)}={p.value:,.6g}" for p in validated]),
+            f"{base:,.4g}" if isinstance(base, (int, float)) else "None",
+            methodology, strategy, profile,
+            self._research_meta.get(qid, {}).get("searchers_used", []),
+            self._is_minibench(), self._ext().factor
+        )
+
         time.sleep(PUBLISH_SLEEP_S)
         return ReasonedPrediction(prediction_value=dist, reasoning=reasoning)
 
@@ -781,14 +810,30 @@ if __name__ == "__main__":
     parser.add_argument("--tournament-ids", nargs="+", type=str, default=["32916", "minibench", "market-pulse-26q2", MetaculusApi.CURRENT_MINIBENCH_ID])
     args = parser.parse_args()
 
-    bot = Yrambot(client_spec=ClientSpecialisation(), research_reports_per_question=1, predictions_per_research_report=1, publish_reports_to_metaculus=True, skip_previously_forecasted_questions=True)
+    bot = Yrambot(
+        client_spec=ClientSpecialisation(),
+        research_reports_per_question=1,
+        predictions_per_research_report=1,
+        publish_reports_to_metaculus=True,
+        skip_previously_forecasted_questions=True
+    )
 
     try:
         all_reports = []
         for tid in args.tournament_ids:
-            reports = await bot.forecast_on_tournament(tid)
-            all_reports.extend(reports)
+            logger.info(f"Forecasting on tournament: {tid}")
+            for attempt in range(RETRY_MAX):
+                try:
+                    reports = asyncio.run(bot.forecast_on_tournament(tid, return_exceptions=True))
+                    all_reports.extend(reports)
+                    break
+                except Exception as e:
+                    if any(x in str(e).lower() for x in ("too many requests", "cloudflare", "1015", "429")):
+                        logger.error(f"Rate-limited on tournament {tid} (attempt {attempt + 1}/{RETRY_MAX}): {e}")
+                        backoff_sleep(attempt)
+                        continue
+                    raise
+            time.sleep(TOURNAMENT_SLEEP_S)
         bot.log_report_summary(all_reports)
     except Exception as e:
-        logger.error(f"Critical error: {len(all_reports)} errors occurred while forecasting: {e}")
-        raise
+        logger.error(f"Critical error: {e}", exc_info=True)
