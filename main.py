@@ -677,7 +677,9 @@ class Yrambot(ForecastBot):
 
     async def _forecast_numeric_core(self, question: NumericQuestion, research: str, profile: QuestionProfile, strategy: str) -> Tuple[List[Percentile], str]:
         prompt = (f"Produce a calibrated probability distribution over possible outcomes.\n{ModellingStrategy.get_prompt_block(strategy, profile)}\n"
-                  f"Question: {question.question_text}\nResearch summary:\n{research}\n"
+                  f"Question: {question.question_text}\n"
+                  f"Lower bound: {getattr(question, 'lower_bound', 'N/A')}, Upper bound: {getattr(question, 'upper_bound', 'N/A')}\n"
+                  f"Research summary:\n{research}\n"
                   'Return JSON array ONLY: [{"percentile":0.1,"value":<num>}, {"percentile":0.2,"value":<num>}, {"percentile":0.4,"value":<num>}, {"percentile":0.6,"value":<num>}, {"percentile":0.8,"value":<num>}, {"percentile":0.9,"value":<num>}]')
         raw = await with_timeout(self.get_llm("default", "llm").invoke(prompt), LLM_TIMEOUT_S, "num_llm")
         try: percentile_list = await structure_output(raw, list[Percentile], model=self.get_llm("parser", "llm"))
@@ -745,6 +747,14 @@ class Yrambot(ForecastBot):
             vals   = [max(lb, min(ub, v)) for v in [center - 0.9 * width, center - 0.5 * width, center - 0.15 * width, center + 0.15 * width, center + 0.5 * width, center + 0.9 * width]]
             validated = enforce_numeric_constraints([Percentile(p, v) for p, v in zip([0.1, 0.2, 0.4, 0.6, 0.8, 0.9], vals)], question)
 
+        # Scale percentiles if they are way below the lower bound
+        lower = getattr(question, 'lower_bound', None) or getattr(question, 'nominal_lower_bound', None)
+        if lower is not None and lower > 1e6:
+            max_p = max(p.value for p in validated)
+            if max_p < lower / 100:
+                scale = lower / max_p
+                validated = [Percentile(p.percentile, p.value * scale) for p in validated]
+
         if "market-pulse" in (self._active_tournament or ""):
             validated = apply_tail_fattening(validated, factor=1.20)
 
@@ -775,4 +785,10 @@ if __name__ == "__main__":
 
     try:
         all_reports = []
-        for tid in args.tournament_ids
+        for tid in args.tournament_ids:
+            reports = await bot.forecast_on_tournament(tid)
+            all_reports.extend(reports)
+        bot.log_report_summary(all_reports)
+    except Exception as e:
+        logger.error(f"Critical error: {len(all_reports)} errors occurred while forecasting: {e}")
+        raise
