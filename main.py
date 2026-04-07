@@ -434,12 +434,17 @@ def enforce_numeric_constraints(percentiles: List[Percentile], question: Numeric
     if upper is None: upper = getattr(question, "nominal_upper_bound", None)
     if lower is None: lower = -np.inf
     if upper is None: upper = np.inf
-    bounded = [Percentile(float(p.percentile), float(max(lower, min(upper, p.value)))) for p in percentiles]
+    
+    # FIX: Added `percentile=` and `value=` keywords
+    bounded = [Percentile(percentile=float(p.percentile), value=float(max(lower, min(upper, p.value)))) for p in percentiles]
+    
     srt  = sorted(bounded, key=lambda x: x.percentile)
     vals = [p.value for p in srt]
     for i in range(1, len(vals)):
         if vals[i] < vals[i - 1]: vals[i] = vals[i - 1]
-    return [Percentile(srt[i].percentile, float(vals[i])) for i in range(len(vals))]
+        
+    # FIX: Added `percentile=` and `value=` keywords
+    return [Percentile(percentile=srt[i].percentile, value=float(vals[i])) for i in range(len(vals))]
 
 def derive_numeric_fallback_bounds(question: NumericQuestion, anchor: Optional[float]) -> Tuple[float, float]:
     lb = getattr(question, "lower_bound", None)
@@ -738,12 +743,14 @@ class Yrambot(ForecastBot):
         qid, base = extract_question_id(question), safe_community_prediction(question)
 
         try: validated, _ = await self._forecast_numeric_core(question, research, profile, strategy)
-        except Exception:
+      except Exception:
             lb, ub = derive_numeric_fallback_bounds(question, base)
             center = float(base) if isinstance(base, (int, float)) else (lb + ub) / 2.0
             width  = (ub - lb) * 0.30
             vals   = [max(lb, min(ub, v)) for v in [center - 0.9 * width, center - 0.5 * width, center - 0.15 * width, center + 0.15 * width, center + 0.5 * width, center + 0.9 * width]]
-            validated = enforce_numeric_constraints([Percentile(p, v) for p, v in zip([0.1, 0.2, 0.4, 0.6, 0.8, 0.9], vals)], question)
+            
+            # FIX: Added `percentile=` and `value=` keywords inside the list comprehension
+            validated = enforce_numeric_constraints([Percentile(percentile=p, value=v) for p, v in zip([0.1, 0.2, 0.4, 0.6, 0.8, 0.9], vals)], question)
 
         if "market-pulse" in (self._active_tournament or ""):
             validated = apply_tail_fattening(validated, factor=1.20)
