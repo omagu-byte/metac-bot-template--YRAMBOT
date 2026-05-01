@@ -519,15 +519,15 @@ def backoff_sleep(attempt: int) -> None:
 def build_reasoning_block(question, forecast_text: str, base_rate_text: str,
                           methodology_text: str, strategy: str, profile: QuestionProfile,
                           searchers_used: List[str], minibench: bool, ext_factor: float) -> str:
-    today         = datetime.utcnow().strftime("%Y-%m-%d")
-    searchers     = ", ".join(searchers_used) if searchers_used else "None"
-    minibench_tag = f" [minibench {ext_factor:.2f}x]" if minibench else ""
-    # Shortened format for Metaculus platform
+    minibench_tag = f" (aggressive mode)" if minibench else ""
+    # First-person insight, short and summarized for Metaculus
     return clean_indents(f"""
-    Forecast: {forecast_text}
-    Strategy: {strategy} | Domain: {profile.domain}{minibench_tag}
-    Anchor: {base_rate_text} | Sources: {searchers}
-    {methodology_text}
+    My forecast: {forecast_text}
+    
+    I anchored on a base rate of {base_rate_text} and adjusted based on recent evidence. 
+    The question falls in {profile.domain}; my analysis suggests the key uncertainty lies in {profile.geography or 'broader trends'}.
+    
+    {methodology_text}{minibench_tag}
     """).strip()
 
 _ARITH_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$")
