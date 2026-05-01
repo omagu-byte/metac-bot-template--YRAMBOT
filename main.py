@@ -46,6 +46,8 @@ dotenv.load_dotenv()
 
 _GPT_MODEL    = "openrouter/openai/gpt-5.4"
 _SONNET_MODEL = "openrouter/anthropic/claude-sonnet-4-6"
+_PERPLEXITY_MODEL = "openrouter/perplexity/sonar-pro"
+_SONAR_MODEL  = "openrouter/sonar-pro"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,7 +80,7 @@ MINIBENCH_IDS = {
     "minibench",
     str(getattr(MetaculusApi, "CURRENT_MINIBENCH_ID", "")),
 }
-SELECTIVE_TOURNAMENTS = ["32916", "market-pulse-26q2"]
+SELECTIVE_TOURNAMENTS = ["33022", "market-pulse-26q2"]
 
 DOMAINS    = ["geopolitics", "economics", "technology", "science",
               "public_health", "environment", "sports", "finance", "social", "other"]
@@ -489,18 +491,13 @@ def build_reasoning_block(question, forecast_text: str, base_rate_text: str,
                           searchers_used: List[str], minibench: bool, ext_factor: float) -> str:
     today         = datetime.utcnow().strftime("%Y-%m-%d")
     searchers     = ", ".join(searchers_used) if searchers_used else "None"
-    minibench_tag = f" [minibench — aggressive extremization {ext_factor:.2f}x]" if minibench else ""
+    minibench_tag = f" [minibench {ext_factor:.2f}x]" if minibench else ""
+    # Shortened format for Metaculus platform
     return clean_indents(f"""
-    Date (UTC): {today}
     Forecast: {forecast_text}
-    Anchor / base rate: {base_rate_text}
-    Domain: {profile.domain} | Geography: {profile.geography or 'global'} | Strategy: {strategy}{minibench_tag}
-
-    Methodology:
+    Strategy: {strategy} | Domain: {profile.domain}{minibench_tag}
+    Anchor: {base_rate_text} | Sources: {searchers}
     {methodology_text}
-
-    Research sources: {searchers}
-    Models: Proprietary LLM Ensemble
     """).strip()
 
 _ARITH_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$")
@@ -534,9 +531,11 @@ class Yrambot(ForecastBot):
     def __init__(self, *args, client_spec: Optional[ClientSpecialisation] = None, **kwargs):
         llms = kwargs.pop("llms", None)
         if llms is None:
-            gpt_llm    = GeneralLlm(model=_GPT_MODEL,    temperature=0.15, timeout=90, allowed_tries=3)
-            sonnet_llm = GeneralLlm(model=_SONNET_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
-            llms = {"default": gpt_llm, "researcher": gpt_llm, "parser": sonnet_llm, "summarizer": sonnet_llm}
+            gpt_llm      = GeneralLlm(model=_GPT_MODEL,        temperature=0.15, timeout=90, allowed_tries=3)
+            sonnet_llm   = GeneralLlm(model=_SONNET_MODEL,     temperature=0.15, timeout=60, allowed_tries=3)
+            perplexity_llm = GeneralLlm(model=_PERPLEXITY_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+            sonar_llm    = GeneralLlm(model=_SONAR_MODEL,      temperature=0.15, timeout=60, allowed_tries=3)
+            llms = {"default": gpt_llm, "researcher": gpt_llm, "parser": sonnet_llm, "summarizer": sonnet_llm, "perplexity": perplexity_llm, "sonar": sonar_llm}
         super().__init__(*args, llms=llms, **kwargs)
 
         self._client_spec        = client_spec or ClientSpecialisation()
@@ -603,9 +602,14 @@ class Yrambot(ForecastBot):
         llm_queries = await self._plan_queries(question, profile, question_type)
         all_queries = list(dict.fromkeys(llm_queries + [f"Metaculus community probability {question.question_text}"]))
         blocks = []
-        for q in all_queries:
+        # Run all search queries in parallel for efficiency
+        async def fetch_query(q: str):
             await self._throttle_search()
-            blocks.extend(await self._sources.fetch_all(q))
+            return await self._sources.fetch_all(q)
+        results = await asyncio.gather(*[fetch_query(q) for q in all_queries], return_exceptions=True)
+        for result in results:
+            if isinstance(result, list):
+                blocks.extend(result)
         return "\n\n".join(b for b in blocks if b.strip()).strip()
 
     async def _synthesize_research(self, question: MetaculusQuestion, metaculus_block: str, source_bundle: str, profile: QuestionProfile, question_type: str) -> str:
@@ -710,6 +714,7 @@ class Yrambot(ForecastBot):
         try: raw_p, _ = await self._forecast_binary_core(question, research, profile, strategy)
         except Exception as e: raw_p = clamp01(float(base) if isinstance(base, (int, float)) else 0.5)
 
+        # Always extremize for minibench, apply normal extremization otherwise
         p_final = self._extremize(raw_p)
 
         if not self._is_minibench() and isinstance(base, (int, float)):
@@ -807,7 +812,7 @@ class Yrambot(ForecastBot):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Yrambot.")
-    parser.add_argument("--tournament-ids", nargs="+", type=str, default=["32916", "minibench", "market-pulse-26q2", MetaculusApi.CURRENT_MINIBENCH_ID])
+    parser.add_argument("--tournament-ids", nargs="+", type=str, default=["33022", "minibench", "market-pulse-26q2", MetaculusApi.CURRENT_MINIBENCH_ID])
     args = parser.parse_args()
 
     bot = Yrambot(
