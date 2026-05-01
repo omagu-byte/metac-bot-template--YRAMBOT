@@ -44,10 +44,10 @@ from tavily import TavilyClient
 
 dotenv.load_dotenv()
 
-_GPT_MODEL    = "openrouter/openai/gpt-5.4"
-_SONNET_MODEL = "openrouter/anthropic/claude-sonnet-4-6"
-_PERPLEXITY_MODEL = "openrouter/perplexity/sonar-pro"
-_SONAR_MODEL  = "openrouter/sonar-pro"
+_GPT_MODEL    = "openrouter/openai/gpt-5.5"
+_SONNET_MODEL = "openrouter/openai/gpt-5.5"
+_PERPLEXITY_MODEL = "openrouter/openai/gpt-5.5"
+_SONAR_MODEL  = "openrouter/openai/gpt-5.5"
 
 logging.basicConfig(
     level=logging.INFO,
