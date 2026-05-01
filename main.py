@@ -46,8 +46,8 @@ dotenv.load_dotenv()
 
 _GPT_MODEL    = "openrouter/openai/gpt-5.5"
 _SONNET_MODEL = "openrouter/openai/gpt-5.5"
-_PERPLEXITY_MODEL = "openrouter/openai/gpt-5.5"
-_SONAR_MODEL  = "openrouter/openai/gpt-5.5"
+_PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
+_GPT5_SEARCH_MODEL = "openrouter/openai/gpt-5"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -242,6 +242,36 @@ class GptWebSearchSource(BaseSource):
             raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "gpt_knowledge_search")
             return raw.strip() if raw and len(raw.strip()) > 60 else ""
         except Exception as exc: return f"GPT search error: {exc}"
+
+
+class PerplexitySonarSource(BaseSource):
+    name = "perplexity_sonar_pro"
+    def __init__(self, llm: GeneralLlm):
+        self._llm = llm
+    
+    def is_available(self) -> bool: return True
+    
+    async def fetch(self, query: str) -> str:
+        prompt = f"Search the web and provide a comprehensive research brief on: {query}\nInclude recent developments, key facts, and relevant sources. Max 800 words."
+        try:
+            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "perplexity_sonar")
+            return raw.strip() if raw and len(raw.strip()) > 80 else ""
+        except Exception as exc: return f"Perplexity Sonar error: {exc}"
+
+
+class Gpt5SearchSource(BaseSource):
+    name = "gpt5_web_search"
+    def __init__(self, llm: GeneralLlm):
+        self._llm = llm
+    
+    def is_available(self) -> bool: return True
+    
+    async def fetch(self, query: str) -> str:
+        prompt = f"Conduct a web search analysis for: {query}\nProvide current information, trends, and relevant background. Focus on factual accuracy. Max 700 words."
+        try:
+            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "gpt5_search")
+            return raw.strip() if raw and len(raw.strip()) > 80 else ""
+        except Exception as exc: return f"GPT-5 search error: {exc}"
 
 
 def _fetch_yfinance_data_sync(ticker: str) -> str:
@@ -533,9 +563,9 @@ class Yrambot(ForecastBot):
         if llms is None:
             gpt_llm      = GeneralLlm(model=_GPT_MODEL,        temperature=0.15, timeout=90, allowed_tries=3)
             sonnet_llm   = GeneralLlm(model=_SONNET_MODEL,     temperature=0.15, timeout=60, allowed_tries=3)
-            perplexity_llm = GeneralLlm(model=_PERPLEXITY_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
-            sonar_llm    = GeneralLlm(model=_SONAR_MODEL,      temperature=0.15, timeout=60, allowed_tries=3)
-            llms = {"default": gpt_llm, "researcher": gpt_llm, "parser": sonnet_llm, "summarizer": sonnet_llm, "perplexity": perplexity_llm, "sonar": sonar_llm}
+            perplexity_llm = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+            gpt5_search_llm = GeneralLlm(model=_GPT5_SEARCH_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+            llms = {"default": gpt_llm, "researcher": gpt_llm, "parser": sonnet_llm, "summarizer": sonnet_llm, "perplexity": perplexity_llm, "gpt5_search": gpt5_search_llm}
         super().__init__(*args, llms=llms, **kwargs)
 
         self._client_spec        = client_spec or ClientSpecialisation()
@@ -549,7 +579,16 @@ class Yrambot(ForecastBot):
         self._sources  = SourceRegistry()
         tavily_src     = TavilySource(api_key=TAVILY_API_KEY or "", max_results=TAVILY_MAX_RESULTS)
         self._sources.register(tavily_src)
-        if not tavily_src.is_available(): self._sources.register(GptWebSearchSource(llm=gpt_search_llm))
+        
+        # Register enhanced research sources
+        if not tavily_src.is_available(): 
+            self._sources.register(GptWebSearchSource(llm=gpt_search_llm))
+        
+        # Add Perplexity Sonar Pro and GPT-5 search for research boost
+        perplexity_sonar = PerplexitySonarSource(llm=self.get_llm("perplexity", "llm"))
+        gpt5_search = Gpt5SearchSource(llm=self.get_llm("gpt5_search", "llm"))
+        self._sources.register(perplexity_sonar)
+        self._sources.register(gpt5_search)
 
         self._ext_cfg = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=EXTREMIZE_FACTOR, floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
         self._ext_cfg_minibench = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=MINIBENCH_EXTREMIZE_FACTOR, floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
