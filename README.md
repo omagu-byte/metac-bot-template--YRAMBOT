@@ -1,11 +1,25 @@
-# Simple Metaculus forecasting bot
-This repository contains a simple bot meant to get you started with creating your own bot for the AI Forecasting Tournament. Go to https://www.metaculus.com/aib/ for more info and tournament rules (this should link to the "Getting Started" section of our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#GettingStarted:~:text=AI%20Forecasting%20Benchmark%3F-,Getting%20Started,-We%27ve%20published%20a) page).
+# Yrambot - Advanced Metaculus Forecasting Bot
+This repository contains an advanced forecasting bot template for the AI Forecasting Tournament. Go to https://www.metaculus.com/aib/ for more info and tournament rules (this should link to the "Getting Started" section of our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#GettingStarted:~:text=AI%20Forecasting%20Benchmark%3F-,Getting%20Started,-We%27ve%20published%20a) page).
+
+## Recent Enhancements (May 2026)
+- ⚡ **Parallel Research Pipeline**: All search queries executed concurrently via `asyncio.gather()` for faster research
+- 🔍 **Multi-Source Research**: 
+  - Tavily Web Search (primary)
+  - Perplexity Sonar Pro (via OpenRouter)
+  - GPT-5 Web Search (via OpenRouter)
+  - GPT Knowledge Search (fallback)
+  - Yahoo Finance (financial questions)
+- 🤖 **All Models on GPT-5.5**: Unified high-performance model stack via OpenRouter
+- 📊 **Tournament Updates**: Now forecasting tournament 33022 + minibench + market-pulse
+- 🎯 **Minibench Extremization**: Aggressive 4x extremization factor for minibench tournaments
+- 📝 **Shortened Metaculus Comments**: Concise, platform-optimized reasoning format
 
 In this project are 2 files:
-- **main.py**: Our recommended template option that uses [forecasting-tools](https://github.com/Metaculus/forecasting-tools) package to handle a lot of stuff in the background for you (such as API calls). We will update the package, thus allowing you to gain new features with minimal changes to your code.
-- **main_with_no_framework.py**: A copy of main.py but implemented with minimal dependencies. Useful if you want a more custom approach.
+- **main.py**: Advanced template using [forecasting-tools](https://github.com/Metaculus/forecasting-tools) with enhanced research and parallel execution. Recommended for production use.
+- **main_with_no_framework.py**: Minimal dependency version for custom implementations.
 
 Join the conversation about bot creation, get support, and follow updates on the [Metaculus Discord](https://discord.com/invite/NJgCC2nDfh) 'build a forecasting bot' channel.
+
 
 ## 30min Video Tutorial
 This tutorial shows you how to set up our template bot so you can start forecasting in the tournament.
@@ -30,8 +44,69 @@ The bot should just work as is at this point. You can disable the workflow by cl
 ## API Keys
 Instructions for getting your METACULUS_TOKEN, OPENROUTER_API_KEY, or optional search provider API keys (AskNews, Exa, Perplexity, etc) are listed on the "Getting Started" section of the [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#GettingStarted:~:text=AI%20Forecasting%20Benchmark%3F-,Getting%20Started,-We%27ve%20published%20a) page.
 
+## Forecasting Pipeline Architecture
+
+### Research Phase
+The bot conducts **parallel research** across multiple sources:
+1. **Query Generation**: LLM generates 5-7 domain-specific search queries
+2. **Parallel Search**: All queries executed concurrently via:
+   - Tavily Web Search (snippet extraction)
+   - Perplexity Sonar Pro (comprehensive research briefs)
+   - GPT-5 Web Search (AI-powered analysis)
+   - Fall back to GPT Knowledge Search if primary unavailable
+   - Yahoo Finance (market data for financial questions)
+3. **Synthesis**: 4-part research brief (Base rate, Updates, Uncertainties, Signposts)
+4. **Caching**: Results cached in SQLite to avoid redundant research
+
+### Question Profiling
+Each question is analyzed across 6 dimensions:
+- **Domain**: Geopolitics, Economics, Tech, Science, Health, Environment, Sports, Finance, Social, Other
+- **Geography**: Global, Regional, National, Local
+- **Time Horizon**: Estimated days to resolution
+- **Strategy**: Trend, Analogical, Market Signal, or Base Rate (selected based on domain/horizon)
+- **Question Type**: Binary, Multiple Choice, or Numeric
+- **Confidence**: 0-1 score based on classifier, evidence, and signal strength
+
+### Forecasting Engines
+- **Binary**: LLM generates 0-100% probability with superforecasting protocol
+- **Multiple Choice**: Per-option probability allocation with normalization
+- **Numeric**: Full percentile distribution (P10, P20, P40, P60, P80, P90) with bound enforcement
+
+### Post-Processing & Quality Gates
+- **Extremization**: Push probabilities toward 0/100 (standard 1.45x, minibench 4.0x)
+- **Crowd Blending**: 65% bot + 35% community (disabled for minibench)
+- **Confidence Gate**: Skip predictions below 0.65 confidence on selective tournaments
+- **Validation**: Log to SQLite with domain breakdown and flagged low-confidence forecasts
+
+### Publishing
+- Formatted reasoning sent to Metaculus with research sources
+- Rate-limiting: 3s between submissions, 8s between tournaments
+- Automatic retry with exponential backoff for API failures
+
+
+## Configuration
+
+### Environment Variables
+Key settings in `.env`:
+- `METACULUS_TOKEN`: Your bot account token
+- `OPENROUTER_API_KEY`: For GPT-5.5, Perplexity Sonar Pro, GPT-5 via OpenRouter
+- `TAVILY_API_KEY`: Web search (optional, but recommended)
+- `RESEARCH_TIMEOUT_S`: Timeout for research (default: 25s)
+- `LLM_TIMEOUT_S`: Timeout for LLM calls (default: 70s)
+- `MAX_CONCURRENT_QUESTIONS`: Parallel question processing (default: 1)
+- `EXTREMIZE_ENABLED`: Enable probability extremization (default: true)
+- `MINIBENCH_EXTREMIZE_FACTOR`: Extremization strength for minibench (default: 4.00)
+- `CROWD_BLEND_MIXED`: Weight of bot vs community (default: 0.65 bot, 0.35 community)
+
+### Tournament Configuration
+Active tournaments (in `main.py`):
+- `33022`: Selective forecasting with confidence gating
+- `minibench`: Minibench mode with aggressive extremization
+- `market-pulse-26q2`: Market-Pulse with tail-fattening on numeric questions
+
 ## Changing the Github automation
 You can change which file is run in the GitHub automation by either changing the content of `main.py` to the contents of `main_with_no_framwork.py` (or another script) or by chaging all references to `main.py` to another script in `.github/workflows/run_bot_on_tournament.yaml` and related files.
+
 
 ## Editing in GitHub UI
 Remember that you can edit a bot non locally by clicking on a file in Github, and then clicking the 'Edit this file' button. Whether you develop locally or not, when making edits, attempt to do things that you think others have not tried, as this will help further innovation in the field more than doing something that has already been done. Feel free to ask about what has or has not been tried in the Discord.
