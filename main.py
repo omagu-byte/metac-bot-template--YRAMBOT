@@ -7,6 +7,7 @@ import os
 import random
 import re
 import sqlite3
+import statistics
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ from tavily import TavilyClient
 dotenv.load_dotenv()
 
 _GPT_MODEL    = "openrouter/openai/gpt-5.5"
+_GPT_MODEL_ALT = "openrouter/openai/gpt-5.1"
 _SONNET_MODEL = "openrouter/openai/gpt-5.5"
 _PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
 _GPT5_SEARCH_MODEL = "openrouter/openai/gpt-5"
@@ -562,10 +564,19 @@ class Yrambot(ForecastBot):
         llms = kwargs.pop("llms", None)
         if llms is None:
             gpt_llm      = GeneralLlm(model=_GPT_MODEL,        temperature=0.15, timeout=90, allowed_tries=3)
+            gpt_llm_alt  = GeneralLlm(model=_GPT_MODEL_ALT,    temperature=0.15, timeout=90, allowed_tries=3)
             sonnet_llm   = GeneralLlm(model=_SONNET_MODEL,     temperature=0.15, timeout=60, allowed_tries=3)
             perplexity_llm = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
             gpt5_search_llm = GeneralLlm(model=_GPT5_SEARCH_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
-            llms = {"default": gpt_llm, "researcher": gpt_llm, "parser": sonnet_llm, "summarizer": sonnet_llm, "perplexity": perplexity_llm, "gpt5_search": gpt5_search_llm}
+            llms = {
+                "default": gpt_llm,
+                "default_alt": gpt_llm_alt,
+                "researcher": gpt_llm,
+                "parser": sonnet_llm,
+                "summarizer": sonnet_llm,
+                "perplexity": perplexity_llm,
+                "gpt5_search": gpt5_search_llm,
+            }
         super().__init__(*args, llms=llms, **kwargs)
 
         self._client_spec        = client_spec or ClientSpecialisation()
@@ -706,39 +717,39 @@ class Yrambot(ForecastBot):
             if confidence < self._validator.LOW_CONFIDENCE_THRESHOLD:
                 raise RuntimeError(f"Selective Forecasting Gate: Confidence {confidence:.2f} too low for Q{qid}. Skipping.")
 
-    async def _forecast_binary_core(self, question: BinaryQuestion, research: str, profile: QuestionProfile, strategy: str) -> Tuple[float, str]:
+    async def _forecast_binary_core(self, question: BinaryQuestion, research: str, profile: QuestionProfile, strategy: str, model_key: str = "default") -> Tuple[float, str]:
         qid, base_rate = extract_question_id(question), safe_community_prediction(question)
         base_str = f"Community prob: {base_rate:.4f}" if isinstance(base_rate, (int, float)) else "No community probability."
         prompt = (f"You are an expert superforecaster. Produce a calibrated probability.\n{ModellingStrategy.get_prompt_block(strategy, profile)}\n"
                   f"Question: {question.question_text}\n{base_str}\nResearch summary:\n{research}\n"
                   "End with EXACTLY: FINAL PROBABILITY: <integer between 0 and 100>%")
-        raw  = await with_timeout(self.get_llm("default", "llm").invoke(prompt), LLM_TIMEOUT_S, "binary_llm")
+        raw  = await with_timeout(self.get_llm(model_key, "llm").invoke(prompt), LLM_TIMEOUT_S, f"binary_llm_{model_key}")
         pred = await structure_output(raw, BinaryPrediction, model=self.get_llm("parser", "llm"))
         return clamp01(float(pred.prediction_in_decimal)), str(raw)
 
-    async def _forecast_mc_core(self, question: MultipleChoiceQuestion, research: str, profile: QuestionProfile, strategy: str) -> Tuple[PredictedOptionList, str]:
+    async def _forecast_mc_core(self, question: MultipleChoiceQuestion, research: str, profile: QuestionProfile, strategy: str, model_key: str = "default") -> Tuple[PredictedOptionList, str]:
         options_list = "\n".join(f"  - {opt}" for opt in question.options)
         prompt = (f"You are an expert superforecaster. Assign probabilities summing to 1.0.\n{ModellingStrategy.get_prompt_block(strategy, profile)}\n"
                   f"Question: {question.question_text}\nOptions:\n{options_list}\nResearch summary:\n{research}\n"
                   'Return JSON ONLY: {"predicted_options": [{"option_name": "<exact name>", "probability": <decimal>}, ...]}')
-        raw    = await with_timeout(self.get_llm("default", "llm").invoke(prompt), LLM_TIMEOUT_S, "mc_llm")
+        raw    = await with_timeout(self.get_llm(model_key, "llm").invoke(prompt), LLM_TIMEOUT_S, f"mc_llm_{model_key}")
         result = await structure_output(raw, PredictedOptionList, model=self.get_llm("parser", "llm"), additional_instructions=f"Names must match: {question.options}")
         probs = {o.option_name: max(0.0, float(o.probability)) for o in result.predicted_options}
         for opt in question.options: probs.setdefault(opt, 0.0)
         total = sum(probs.values()) or 1.0
         return PredictedOptionList(predicted_options=[PredictedOption(option_name=opt, probability=float(probs[opt]/total)) for opt in question.options]), str(raw)
 
-    async def _forecast_numeric_core(self, question: NumericQuestion, research: str, profile: QuestionProfile, strategy: str) -> Tuple[List[Percentile], str]:
+    async def _forecast_numeric_core(self, question: NumericQuestion, research: str, profile: QuestionProfile, strategy: str, model_key: str = "default") -> Tuple[List[Percentile], str]:
         prompt = (f"Produce a calibrated probability distribution over possible outcomes.\n{ModellingStrategy.get_prompt_block(strategy, profile)}\n"
                   f"Question: {question.question_text}\n"
                   f"Lower bound: {getattr(question, 'lower_bound', 'N/A')}, Upper bound: {getattr(question, 'upper_bound', 'N/A')}\n"
                   f"Research summary:\n{research}\n"
                   'Return JSON array ONLY: [{"percentile":0.1,"value":<num>}, {"percentile":0.2,"value":<num>}, {"percentile":0.4,"value":<num>}, {"percentile":0.6,"value":<num>}, {"percentile":0.8,"value":<num>}, {"percentile":0.9,"value":<num>}]')
-        raw = await with_timeout(self.get_llm("default", "llm").invoke(prompt), LLM_TIMEOUT_S, "num_llm")
+        raw = await with_timeout(self.get_llm(model_key, "llm").invoke(prompt), LLM_TIMEOUT_S, f"num_llm_{model_key}")
         try:
             percentile_list = await structure_output(raw, list[Percentile], model=self.get_llm("parser", "llm"))
         except Exception:
-            repaired = await with_timeout(self.get_llm("summarizer", "llm").invoke(f"Convert to valid JSON array of Percentile objects.\n{sanitize_numeric_json(str(raw))}"), LLM_TIMEOUT_S, "num_repair")
+            repaired = await with_timeout(self.get_llm("summarizer", "llm").invoke(f"Convert to valid JSON array of Percentile objects.\n{sanitize_numeric_json(str(raw))}"), LLM_TIMEOUT_S, f"num_repair_{model_key}")
             percentile_list = await structure_output(repaired, list[Percentile], model=self.get_llm("parser", "llm"))
         validated = enforce_numeric_constraints(
             interpolate_missing_percentiles(percentile_list, [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]),
@@ -750,8 +761,18 @@ class Yrambot(ForecastBot):
         profile, strategy = await self._get_profile_and_strategy(question, "binary")
         qid, base = extract_question_id(question), safe_community_prediction(question)
 
-        try: raw_p, _ = await self._forecast_binary_core(question, research, profile, strategy)
-        except Exception as e: raw_p = clamp01(float(base) if isinstance(base, (int, float)) else 0.5)
+        raw_ps = []
+        for model_key in ("default", "default_alt"):
+            try:
+                p, _ = await self._forecast_binary_core(question, research, profile, strategy, model_key=model_key)
+                raw_ps.append(p)
+            except Exception as e:
+                logger.warning(f"[Yrambot] binary forecast failed for {model_key}: {e}")
+
+        if not raw_ps:
+            raw_p = clamp01(float(base) if isinstance(base, (int, float)) else 0.5)
+        else:
+            raw_p = statistics.median(raw_ps)
 
         # Always extremize for minibench, apply normal extremization otherwise
         p_final = self._extremize(raw_p)
@@ -775,8 +796,23 @@ class Yrambot(ForecastBot):
         profile, strategy = await self._get_profile_and_strategy(question, "multiple_choice")
         qid = extract_question_id(question)
 
-        try: out, _ = await self._forecast_mc_core(question, research, profile, strategy)
-        except Exception: out = PredictedOptionList(predicted_options=[PredictedOption(option_name=opt, probability=1.0 / len(question.options)) for opt in question.options])
+        results = []
+        for model_key in ("default", "default_alt"):
+            try:
+                out, _ = await self._forecast_mc_core(question, research, profile, strategy, model_key=model_key)
+                results.append(out)
+            except Exception as e:
+                logger.warning(f"[Yrambot] multiple-choice forecast failed for {model_key}: {e}")
+
+        if results:
+            merged_probs = {}
+            for opt in question.options:
+                values = [next((o.probability for o in result.predicted_options if o.option_name == opt), 0.0) for result in results]
+                merged_probs[opt] = statistics.median(values)
+            total = sum(merged_probs.values()) or 1.0
+            out = PredictedOptionList(predicted_options=[PredictedOption(option_name=opt, probability=merged_probs[opt] / total) for opt in question.options])
+        else:
+            out = PredictedOptionList(predicted_options=[PredictedOption(option_name=opt, probability=1.0 / len(question.options)) for opt in question.options])
 
         if self._is_minibench():
             extremized = {o.option_name: extremize_probability(o.probability, self._ext_cfg_minibench) for o in out.predicted_options}
@@ -797,9 +833,22 @@ class Yrambot(ForecastBot):
         profile, strategy = await self._get_profile_and_strategy(question, "numeric")
         qid, base = extract_question_id(question), safe_community_prediction(question)
 
-        try:
-            validated, _ = await self._forecast_numeric_core(question, research, profile, strategy)
-        except Exception:
+        results = []
+        for model_key in ("default", "default_alt"):
+            try:
+                validated, _ = await self._forecast_numeric_core(question, research, profile, strategy, model_key=model_key)
+                results.append(validated)
+            except Exception as e:
+                logger.warning(f"[Yrambot] numeric forecast failed for {model_key}: {e}")
+
+        if results:
+            merged = []
+            percentiles = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
+            for p in percentiles:
+                values = [next((x.value for x in result if x.percentile == p), 0.0) for result in results]
+                merged.append(Percentile(percentile=p, value=statistics.median(values)))
+            validated = enforce_numeric_constraints(merged, question)
+        else:
             lb, ub = derive_numeric_fallback_bounds(question, base)
             center = float(base) if isinstance(base, (int, float)) else (lb + ub) / 2.0
             width  = (ub - lb) * 0.30
