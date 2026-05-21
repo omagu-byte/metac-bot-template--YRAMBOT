@@ -574,8 +574,8 @@ class Yrambot(ForecastBot):
                 "default":     claude_llm,      # Claude Sonnet 4.5 — primary forecaster
                 "default_alt": gpt51_llm,       # GPT-5.1 — ensemble partner
                 "researcher":  sonar_pro_llm,   # Perplexity Sonar Pro — research
-                "parser":      gpt51_llm,       # GPT-5.1 — structured output parsing
-                "summarizer":  gpt51_llm,       # GPT-5.1 — summarization
+                "parser":      sonar_pro_llm,   # Perplexity Sonar Pro — structured output parsing
+                "summarizer":  sonar_pro_llm,   # Perplexity Sonar Pro — summarization
                 "perplexity":  sonar_pro_llm,   # Perplexity Sonar Pro — search source
                 "gpt5_search": sonar_base_llm,  # Perplexity Sonar — secondary search
             }
@@ -665,7 +665,8 @@ class Yrambot(ForecastBot):
 
     async def _synthesize_research(self, question: MetaculusQuestion, metaculus_block: str, source_bundle: str, profile: QuestionProfile, question_type: str) -> str:
         prompt = f"Synthesize evidence into a 4-part research brief (Base rate, Updates, Uncertainties, Signposts). Max 2400 chars.\nQuestion: {question.question_text}\nSources:\n{metaculus_block}\n[Web Research]\n{source_bundle}"
-        return (await with_timeout(self.get_llm("summarizer", "llm").invoke(prompt), LLM_TIMEOUT_S, "research_synthesis") or "").strip()
+        _summarizer = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+        return (await with_timeout(_summarizer.invoke(prompt), LLM_TIMEOUT_S, "research_synthesis") or "").strip()
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
@@ -756,7 +757,8 @@ class Yrambot(ForecastBot):
         try:
             percentile_list = await structure_output(raw, list[Percentile], model=self.get_llm("parser", "llm"))
         except Exception:
-            repaired = await with_timeout(self.get_llm("summarizer", "llm").invoke(f"Convert to valid JSON array of Percentile objects.\n{sanitize_numeric_json(str(raw))}"), LLM_TIMEOUT_S, f"num_repair_{model_key}")
+            _summarizer = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+            repaired = await with_timeout(_summarizer.invoke(f"Convert to valid JSON array of Percentile objects.\n{sanitize_numeric_json(str(raw))}"), LLM_TIMEOUT_S, f"num_repair_{model_key}")
             percentile_list = await structure_output(repaired, list[Percentile], model=self.get_llm("parser", "llm"))
         validated = enforce_numeric_constraints(
             interpolate_missing_percentiles(percentile_list, [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]),
