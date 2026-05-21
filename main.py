@@ -52,7 +52,12 @@ _SONNET_MODEL           = "openrouter/openai/gpt-5.1"
 _PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
 _PERPLEXITY_SONAR_BASE  = "openrouter/perplexity/sonar"
 _FREE_MODEL             = "openrouter/mistralai/mistral-7b-instruct:free"
-# Fallback free models if capacity issues: openrouter/google/gemma-3-4b-it:free, openrouter/meta-llama/llama-3.1-8b-instruct:free
+_FREE_MODEL_CHAIN       = [
+    "openrouter/mistralai/mistral-7b-instruct:free",
+    "openrouter/google/gemma-3-4b-it:free",
+    "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+    "openrouter/free",
+]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -520,6 +525,24 @@ async def with_timeout(coro, seconds: float, label: str) -> str:
     except asyncio.TimeoutError: return f"{label} timed out after {seconds}s"
     except Exception as e: return f"{label} error: {e}"
 
+async def invoke_with_free_model_fallback(prompt: str, temperature: float = 0.15, timeout_s: float = 60, label: str = "free_invoke") -> str:
+    """Try free models in fallback chain. Returns result from first successful model."""
+    last_error = None
+    for model_idx, model in enumerate(_FREE_MODEL_CHAIN):
+        try:
+            llm = GeneralLlm(model=model, temperature=temperature, timeout=timeout_s, allowed_tries=2)
+            result = await with_timeout(llm.invoke(prompt), timeout_s, f"{label}_{model_idx}")
+            if result and not result.startswith(label) and not "error" in result.lower() and "timed out" not in result.lower():
+                logger.info(f"[Free Model Fallback] Success with {model}")
+                return result
+            last_error = result
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"[Free Model Fallback] {model} failed: {e}")
+            continue
+    logger.error(f"[Free Model Fallback] All free models exhausted for {label}")
+    return last_error or f"{label} all models failed"
+
 def backoff_sleep(attempt: int) -> None:
     base   = min(RETRY_MAX_S, RETRY_BASE_S * (2 ** attempt))
     time.sleep(base + random.uniform(0.0, base * 0.25))
@@ -576,8 +599,8 @@ class Yrambot(ForecastBot):
                 "default":     claude_llm,      # Claude Sonnet 4.5 — primary forecaster
                 "default_alt": gpt51_llm,       # GPT-5.1 — ensemble partner
                 "researcher":  sonar_pro_llm,   # Perplexity Sonar Pro — research
-                "parser":      GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=3),
-                "summarizer":  GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=3),
+                "parser":      GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=2),
+                "summarizer":  GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=2),
                 "perplexity":  sonar_pro_llm,   # Perplexity Sonar Pro — search source
                 "gpt5_search": sonar_base_llm,  # Perplexity Sonar — secondary search
             }
@@ -587,7 +610,7 @@ class Yrambot(ForecastBot):
         self._research_cache     = ResearchCache()
         self._validator          = ForecastValidator()
         self._analyser           = QuestionAnalyser(
-            GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+            GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=2)
         )
         self._research_meta:     Dict[str, Dict[str, Any]] = {}
         self._active_tournament: Optional[str] = None
@@ -667,8 +690,8 @@ class Yrambot(ForecastBot):
 
     async def _synthesize_research(self, question: MetaculusQuestion, metaculus_block: str, source_bundle: str, profile: QuestionProfile, question_type: str) -> str:
         prompt = f"Synthesize evidence into a 4-part research brief (Base rate, Updates, Uncertainties, Signposts). Max 2400 chars.\nQuestion: {question.question_text}\nSources:\n{metaculus_block}\n[Web Research]\n{source_bundle}"
-        _summarizer = GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
-        return (await with_timeout(_summarizer.invoke(prompt), LLM_TIMEOUT_S, "research_synthesis") or "").strip()
+        result = await invoke_with_free_model_fallback(prompt, temperature=0.15, timeout_s=LLM_TIMEOUT_S, label="research_synthesis")
+        return result.strip() if result else ""
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
@@ -759,9 +782,13 @@ class Yrambot(ForecastBot):
         try:
             percentile_list = await structure_output(raw, list[Percentile], model=self.get_llm("parser", "llm"))
         except Exception:
-            _summarizer = GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
-            repaired = await with_timeout(_summarizer.invoke(f"Convert to valid JSON array of Percentile objects.\n{sanitize_numeric_json(str(raw))}"), LLM_TIMEOUT_S, f"num_repair_{model_key}")
-            percentile_list = await structure_output(repaired, list[Percentile], model=self.get_llm("parser", "llm"))
+            repair_prompt = f"Convert to valid JSON array of Percentile objects.\n{sanitize_numeric_json(str(raw))}"
+            repaired = await invoke_with_free_model_fallback(repair_prompt, temperature=0.15, timeout_s=LLM_TIMEOUT_S, label=f"num_repair_{model_key}")
+            try:
+                percentile_list = await structure_output(repaired, list[Percentile], model=self.get_llm("parser", "llm"))
+            except Exception as e:
+                logger.error(f"Numeric repair failed even with fallback models: {e}")
+                raise
         validated = enforce_numeric_constraints(
             interpolate_missing_percentiles(percentile_list, [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]),
             question
