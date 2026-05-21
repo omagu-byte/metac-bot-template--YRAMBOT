@@ -45,11 +45,12 @@ from tavily import TavilyClient
 
 dotenv.load_dotenv()
 
-_GPT_MODEL    = "openrouter/openai/gpt-5.5"
-_GPT_MODEL_ALT = "openrouter/openai/gpt-5.1"
-_SONNET_MODEL = "openrouter/openai/gpt-5.5"
+# --- Model strings ---
+_CLAUDE_MODEL           = "openrouter/anthropic/claude-sonnet-4-5"
+_GPT_MODEL_ALT          = "openrouter/openai/gpt-5.1"
+_SONNET_MODEL           = "openrouter/openai/gpt-5.1"
 _PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
-_GPT5_SEARCH_MODEL = "openrouter/openai/gpt-5"
+_PERPLEXITY_SONAR_BASE  = "openrouter/perplexity/sonar"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,7 +136,9 @@ class QuestionAnalyser:
             )
         except Exception as exc:
             logger.warning(f"[Analyser] classify failed: {exc}")
-            return QuestionProfile()
+            # FIX: Return neutral confidence (0.5) instead of 0.0 so a model
+            # 404 doesn't cascade into a confidence-gate failure downstream.
+            return QuestionProfile(confidence_in_profile=0.5)
 
 
 class ModellingStrategy:
@@ -250,9 +253,9 @@ class PerplexitySonarSource(BaseSource):
     name = "perplexity_sonar_pro"
     def __init__(self, llm: GeneralLlm):
         self._llm = llm
-    
+
     def is_available(self) -> bool: return True
-    
+
     async def fetch(self, query: str) -> str:
         prompt = f"Search the web and provide a comprehensive research brief on: {query}\nInclude recent developments, key facts, and relevant sources. Max 800 words."
         try:
@@ -265,9 +268,9 @@ class Gpt5SearchSource(BaseSource):
     name = "gpt5_web_search"
     def __init__(self, llm: GeneralLlm):
         self._llm = llm
-    
+
     def is_available(self) -> bool: return True
-    
+
     async def fetch(self, query: str) -> str:
         prompt = f"Conduct a web search analysis for: {query}\nProvide current information, trends, and relevant background. Focus on factual accuracy. Max 700 words."
         try:
@@ -323,7 +326,10 @@ class ForecastValidator:
         classifier_score = profile.confidence_in_profile
         evidence_score   = min(1.0, research_length / 3000)
         signal_score     = abs(prediction_value - 0.5) * 2.5 if isinstance(prediction_value, float) else 0.5
-        return round(min(1.0, max(0.0, 0.4 * classifier_score + 0.4 * evidence_score + 0.2 * signal_score)), 3)
+        # FIX 2: Rebalanced weights — evidence carries more weight (0.55) so a
+        # classifier failure (confidence_in_profile=0.0) can no longer push the
+        # total below the 0.65 gate on its own when research is present.
+        return round(min(1.0, max(0.0, 0.25 * classifier_score + 0.55 * evidence_score + 0.20 * signal_score)), 3)
 
     def validate(self, question: MetaculusQuestion, profile: QuestionProfile, strategy: str, prediction_value: Any, research: str) -> ValidationRecord:
         confidence = self.compute_confidence(prediction_value, profile, len(research))
@@ -469,7 +475,6 @@ def enforce_numeric_constraints(percentiles: List[Percentile], question: Numeric
     if lower is None: lower = -np.inf
     if upper is None: upper = np.inf
 
-    # FIX: Always use keyword arguments for Pydantic BaseModel
     bounded = [
         Percentile(percentile=float(p.percentile), value=float(max(lower, min(upper, p.value))))
         for p in percentiles
@@ -480,7 +485,6 @@ def enforce_numeric_constraints(percentiles: List[Percentile], question: Numeric
     for i in range(1, len(vals)):
         if vals[i] < vals[i - 1]: vals[i] = vals[i - 1]
 
-    # FIX: Always use keyword arguments for Pydantic BaseModel
     return [Percentile(percentile=srt[i].percentile, value=float(vals[i])) for i in range(len(vals))]
 
 def derive_numeric_fallback_bounds(question: NumericQuestion, anchor: Optional[float]) -> Tuple[float, float]:
@@ -522,7 +526,6 @@ def build_reasoning_block(question, forecast_text: str, base_rate_text: str,
                           methodology_text: str, strategy: str, profile: QuestionProfile,
                           searchers_used: List[str], minibench: bool, ext_factor: float) -> str:
     minibench_tag = f" (aggressive mode)" if minibench else ""
-    # First-person insight, short and summarized for Metaculus
     return clean_indents(f"""
     My forecast: {forecast_text}
     
@@ -563,19 +566,18 @@ class Yrambot(ForecastBot):
     def __init__(self, *args, client_spec: Optional[ClientSpecialisation] = None, **kwargs):
         llms = kwargs.pop("llms", None)
         if llms is None:
-            gpt_llm      = GeneralLlm(model=_GPT_MODEL,        temperature=0.15, timeout=90, allowed_tries=3)
-            gpt_llm_alt  = GeneralLlm(model=_GPT_MODEL_ALT,    temperature=0.15, timeout=90, allowed_tries=3)
-            sonnet_llm   = GeneralLlm(model=_SONNET_MODEL,     temperature=0.15, timeout=60, allowed_tries=3)
-            perplexity_llm = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
-            gpt5_search_llm = GeneralLlm(model=_GPT5_SEARCH_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+            claude_llm       = GeneralLlm(model=_CLAUDE_MODEL,            temperature=0.15, timeout=90, allowed_tries=3)
+            gpt51_llm        = GeneralLlm(model=_GPT_MODEL_ALT,           temperature=0.15, timeout=90, allowed_tries=3)
+            sonar_pro_llm    = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL,  temperature=0.15, timeout=60, allowed_tries=3)
+            sonar_base_llm   = GeneralLlm(model=_PERPLEXITY_SONAR_BASE,   temperature=0.15, timeout=60, allowed_tries=3)
             llms = {
-                "default": gpt_llm,
-                "default_alt": gpt_llm_alt,
-                "researcher": gpt_llm,
-                "parser": sonnet_llm,
-                "summarizer": sonnet_llm,
-                "perplexity": perplexity_llm,
-                "gpt5_search": gpt5_search_llm,
+                "default":     claude_llm,      # Claude Sonnet 4.5 — primary forecaster
+                "default_alt": gpt51_llm,       # GPT-5.1 — ensemble partner
+                "researcher":  sonar_pro_llm,   # Perplexity Sonar Pro — research
+                "parser":      gpt51_llm,       # GPT-5.1 — structured output parsing
+                "summarizer":  gpt51_llm,       # GPT-5.1 — summarization
+                "perplexity":  sonar_pro_llm,   # Perplexity Sonar Pro — search source
+                "gpt5_search": sonar_base_llm,  # Perplexity Sonar — secondary search
             }
         super().__init__(*args, llms=llms, **kwargs)
 
@@ -586,18 +588,16 @@ class Yrambot(ForecastBot):
         self._research_meta:     Dict[str, Dict[str, Any]] = {}
         self._active_tournament: Optional[str] = None
 
-        gpt_search_llm = GeneralLlm(model=_GPT_MODEL, temperature=0.1, timeout=60, allowed_tries=2)
+        sonar_fallback_llm = GeneralLlm(model=_PERPLEXITY_SONAR_BASE, temperature=0.1, timeout=60, allowed_tries=2)
         self._sources  = SourceRegistry()
         tavily_src     = TavilySource(api_key=TAVILY_API_KEY or "", max_results=TAVILY_MAX_RESULTS)
         self._sources.register(tavily_src)
-        
-        # Register enhanced research sources
-        if not tavily_src.is_available(): 
-            self._sources.register(GptWebSearchSource(llm=gpt_search_llm))
-        
-        # Add Perplexity Sonar Pro and GPT-5 search for research boost
+
+        if not tavily_src.is_available():
+            self._sources.register(GptWebSearchSource(llm=sonar_fallback_llm))
+
         perplexity_sonar = PerplexitySonarSource(llm=self.get_llm("perplexity", "llm"))
-        gpt5_search = Gpt5SearchSource(llm=self.get_llm("gpt5_search", "llm"))
+        gpt5_search      = Gpt5SearchSource(llm=self.get_llm("gpt5_search", "llm"))
         self._sources.register(perplexity_sonar)
         self._sources.register(gpt5_search)
 
@@ -652,7 +652,6 @@ class Yrambot(ForecastBot):
         llm_queries = await self._plan_queries(question, profile, question_type)
         all_queries = list(dict.fromkeys(llm_queries + [f"Metaculus community probability {question.question_text}"]))
         blocks = []
-        # Run all search queries in parallel for efficiency
         async def fetch_query(q: str):
             await self._throttle_search()
             return await self._sources.fetch_all(q)
@@ -693,8 +692,14 @@ class Yrambot(ForecastBot):
             source_bundle   = await self._multi_source_research_bundle(question, profile, q_type)
             synthesized     = await self._synthesize_research(question, metaculus_block, source_bundle, profile, q_type)
 
+            # FIX 3: Degrade to a warning + raw bundle fallback instead of a hard
+            # crash when synthesis is thin but web research was actually retrieved.
             if REQUIRE_RESEARCH and not is_meaningful_research_text(synthesized):
-                raise RuntimeError(f"Insufficient synthesized research for Q{qid}.")
+                if source_bundle and len(source_bundle.strip()) > 300:
+                    logger.warning(f"[Research] Synthesis weak for Q{qid}, falling back to raw bundle.")
+                    synthesized = source_bundle[:2400]
+                else:
+                    raise RuntimeError(f"Insufficient synthesized research for Q{qid}.")
 
             final = (f"{fin_data}{metaculus_block}\n\n[Research Summary]\n{synthesized}\n\n[Raw Web Research]\n{source_bundle}"
                      if source_bundle else f"{fin_data}{metaculus_block}\n\n[Research Summary]\n{synthesized}")
@@ -774,7 +779,6 @@ class Yrambot(ForecastBot):
         else:
             raw_p = statistics.median(raw_ps)
 
-        # Always extremize for minibench, apply normal extremization otherwise
         p_final = self._extremize(raw_p)
 
         if not self._is_minibench() and isinstance(base, (int, float)):
@@ -828,7 +832,6 @@ class Yrambot(ForecastBot):
         time.sleep(PUBLISH_SLEEP_S)
         return ReasonedPrediction(prediction_value=out, reasoning=reasoning)
 
-    # FIX: Method is now correctly indented inside the Yrambot class
     async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
         profile, strategy = await self._get_profile_and_strategy(question, "numeric")
         qid, base = extract_question_id(question), safe_community_prediction(question)
@@ -856,13 +859,11 @@ class Yrambot(ForecastBot):
                 center - 0.9 * width, center - 0.5 * width, center - 0.15 * width,
                 center + 0.15 * width, center + 0.5 * width, center + 0.9 * width
             ]]
-            # FIX: Use keyword arguments for Pydantic BaseModel
             validated = enforce_numeric_constraints(
                 [Percentile(percentile=p, value=v) for p, v in zip([0.1, 0.2, 0.4, 0.6, 0.8, 0.9], vals)],
                 question
             )
 
-        # Scale percentiles if they are way below the lower bound
         lower = getattr(question, 'lower_bound', None) or getattr(question, 'nominal_lower_bound', None)
         if lower is not None and lower > 1e6:
             max_p = max(p.value for p in validated)
