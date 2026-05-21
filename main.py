@@ -51,9 +51,8 @@ _GPT_MODEL_ALT          = "openrouter/openai/gpt-5.1"
 _SONNET_MODEL           = "openrouter/openai/gpt-5.1"
 _PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
 _PERPLEXITY_SONAR_BASE  = "openrouter/perplexity/sonar"
-_FREE_MODEL             = "openrouter/mistralai/mistral-7b-instruct:free"
+_FREE_MODEL             = "openrouter/perplexity/sonar"
 _FREE_MODEL_CHAIN       = [
-    "openrouter/mistralai/mistral-7b-instruct:free",
     "openrouter/google/gemma-3-4b-it:free",
     "openrouter/meta-llama/llama-3.1-8b-instruct:free",
     "openrouter/free",
@@ -942,7 +941,7 @@ if __name__ == "__main__":
         research_reports_per_question=1,
         predictions_per_research_report=1,
         publish_reports_to_metaculus=True,
-        skip_previously_forecasted_questions=False
+        skip_previously_forecasted_questions=True
     )
 
     try:
