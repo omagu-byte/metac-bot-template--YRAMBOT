@@ -46,7 +46,7 @@ from tavily import TavilyClient
 dotenv.load_dotenv()
 
 # --- Model strings ---
-_CLAUDE_MODEL           = "openrouter/anthropic/claude-sonnet-4-5"
+_CLAUDE_MODEL           = "openrouter/anthropic/claude-sonnet-4.6"
 _GPT_MODEL_ALT          = "openrouter/openai/gpt-5.1"
 _SONNET_MODEL           = "openrouter/openai/gpt-5.1"
 _PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
@@ -584,7 +584,9 @@ class Yrambot(ForecastBot):
         self._client_spec        = client_spec or ClientSpecialisation()
         self._research_cache     = ResearchCache()
         self._validator          = ForecastValidator()
-        self._analyser           = QuestionAnalyser(self.get_llm("researcher", "llm"))
+        self._analyser           = QuestionAnalyser(
+            GeneralLlm(model=_PERPLEXITY_SONAR_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+        )
         self._research_meta:     Dict[str, Dict[str, Any]] = {}
         self._active_tournament: Optional[str] = None
 
