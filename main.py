@@ -45,17 +45,23 @@ from tavily import TavilyClient
 
 dotenv.load_dotenv()
 
-# --- Model strings ---
-_CLAUDE_MODEL           = "openrouter/anthropic/claude-sonnet-4.6"
-_GPT_MODEL_ALT          = "openrouter/openai/gpt-5.1"
-_SONNET_MODEL           = "openrouter/openai/gpt-5.1"
-_PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
-_PERPLEXITY_SONAR_BASE  = "openrouter/perplexity/sonar"
+# ---------------------------------------------------------------------------
+# Model strings — ALL using Perplexity via OpenRouter (only allowed provider)
+# ---------------------------------------------------------------------------
+# Primary forecaster: sonar-reasoning-pro has chain-of-thought + live web search
+_PRIMARY_MODEL          = "openrouter/perplexity/sonar-reasoning-pro"
+# Secondary/ensemble: sonar-pro for synthesis and research
+_SECONDARY_MODEL        = "openrouter/perplexity/sonar-pro"
+# Fast/cheap: sonar for parsing, summarizing, quick tasks
+_FAST_MODEL             = "openrouter/perplexity/sonar"
+# Research: sonar-pro with live web context
+_RESEARCH_MODEL         = "openrouter/perplexity/sonar-pro"
+
+# Free model chain — sonar is cheapest Perplexity tier
 _FREE_MODEL             = "openrouter/perplexity/sonar"
 _FREE_MODEL_CHAIN       = [
-    "openrouter/google/gemma-3-4b-it:free",
-    "openrouter/meta-llama/llama-3.1-8b-instruct:free",
-    "openrouter/free",
+    "openrouter/perplexity/sonar",
+    "openrouter/perplexity/sonar-pro",
 ]
 
 logging.basicConfig(
@@ -142,8 +148,8 @@ class QuestionAnalyser:
             )
         except Exception as exc:
             logger.warning(f"[Analyser] classify failed: {exc}")
-            # FIX: Return neutral confidence (0.5) instead of 0.0 so a model
-            # 404 doesn't cascade into a confidence-gate failure downstream.
+            # Return neutral confidence so a model error doesn't cascade into a
+            # confidence-gate failure downstream when research is present.
             return QuestionProfile(confidence_in_profile=0.5)
 
 
@@ -243,19 +249,8 @@ class TavilySource(BaseSource):
             return f"Tavily error: {exc}"
 
 
-class GptWebSearchSource(BaseSource):
-    name = "gpt_knowledge_search"
-    def __init__(self, llm: GeneralLlm): self._llm = llm
-    def is_available(self) -> bool: return True
-    async def fetch(self, query: str) -> str:
-        prompt = f"Produce a factual research brief. Prefix uncertain claims. Under 600 words.\nResearch query: {query}"
-        try:
-            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "gpt_knowledge_search")
-            return raw.strip() if raw and len(raw.strip()) > 60 else ""
-        except Exception as exc: return f"GPT search error: {exc}"
-
-
 class PerplexitySonarSource(BaseSource):
+    """Primary web-search source using Perplexity sonar-pro (live web context)."""
     name = "perplexity_sonar_pro"
     def __init__(self, llm: GeneralLlm):
         self._llm = llm
@@ -263,26 +258,36 @@ class PerplexitySonarSource(BaseSource):
     def is_available(self) -> bool: return True
 
     async def fetch(self, query: str) -> str:
-        prompt = f"Search the web and provide a comprehensive research brief on: {query}\nInclude recent developments, key facts, and relevant sources. Max 800 words."
+        prompt = (
+            f"Search the web and provide a comprehensive research brief on: {query}\n"
+            "Include recent developments, key facts, and relevant sources. Max 800 words."
+        )
         try:
-            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "perplexity_sonar")
+            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "perplexity_sonar_pro")
             return raw.strip() if raw and len(raw.strip()) > 80 else ""
-        except Exception as exc: return f"Perplexity Sonar error: {exc}"
+        except Exception as exc:
+            return f"Perplexity Sonar Pro error: {exc}"
 
 
-class Gpt5SearchSource(BaseSource):
-    name = "gpt5_web_search"
+class PerplexitySonarReasoningSource(BaseSource):
+    """Secondary source using Perplexity sonar-reasoning-pro for deeper analysis."""
+    name = "perplexity_sonar_reasoning"
     def __init__(self, llm: GeneralLlm):
         self._llm = llm
 
     def is_available(self) -> bool: return True
 
     async def fetch(self, query: str) -> str:
-        prompt = f"Conduct a web search analysis for: {query}\nProvide current information, trends, and relevant background. Focus on factual accuracy. Max 700 words."
+        prompt = (
+            f"Conduct a deep research analysis for: {query}\n"
+            "Provide current information, trends, and relevant background. "
+            "Focus on factual accuracy and cite sources where possible. Max 700 words."
+        )
         try:
-            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "gpt5_search")
+            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "perplexity_reasoning")
             return raw.strip() if raw and len(raw.strip()) > 80 else ""
-        except Exception as exc: return f"GPT-5 search error: {exc}"
+        except Exception as exc:
+            return f"Perplexity Reasoning error: {exc}"
 
 
 def _fetch_yfinance_data_sync(ticker: str) -> str:
@@ -332,9 +337,9 @@ class ForecastValidator:
         classifier_score = profile.confidence_in_profile
         evidence_score   = min(1.0, research_length / 3000)
         signal_score     = abs(prediction_value - 0.5) * 2.5 if isinstance(prediction_value, float) else 0.5
-        # FIX 2: Rebalanced weights — evidence carries more weight (0.55) so a
-        # classifier failure (confidence_in_profile=0.0) can no longer push the
-        # total below the 0.65 gate on its own when research is present.
+        # Rebalanced: evidence carries 0.55 weight so a classifier failure
+        # (confidence_in_profile=0.0) can't push the total below the 0.65 gate
+        # on its own when research is present.
         return round(min(1.0, max(0.0, 0.25 * classifier_score + 0.55 * evidence_score + 0.20 * signal_score)), 3)
 
     def validate(self, question: MetaculusQuestion, profile: QuestionProfile, strategy: str, prediction_value: Any, research: str) -> ValidationRecord:
@@ -525,13 +530,13 @@ async def with_timeout(coro, seconds: float, label: str) -> str:
     except Exception as e: return f"{label} error: {e}"
 
 async def invoke_with_free_model_fallback(prompt: str, temperature: float = 0.15, timeout_s: float = 60, label: str = "free_invoke") -> str:
-    """Try free models in fallback chain. Returns result from first successful model."""
+    """Try Perplexity models in fallback chain. Returns result from first successful model."""
     last_error = None
     for model_idx, model in enumerate(_FREE_MODEL_CHAIN):
         try:
             llm = GeneralLlm(model=model, temperature=temperature, timeout=timeout_s, allowed_tries=2)
             result = await with_timeout(llm.invoke(prompt), timeout_s, f"{label}_{model_idx}")
-            if result and not result.startswith(label) and not "error" in result.lower() and "timed out" not in result.lower():
+            if result and not result.startswith(label) and "error" not in result.lower() and "timed out" not in result.lower():
                 logger.info(f"[Free Model Fallback] Success with {model}")
                 return result
             last_error = result
@@ -539,7 +544,7 @@ async def invoke_with_free_model_fallback(prompt: str, temperature: float = 0.15
             last_error = str(e)
             logger.warning(f"[Free Model Fallback] {model} failed: {e}")
             continue
-    logger.error(f"[Free Model Fallback] All free models exhausted for {label}")
+    logger.error(f"[Free Model Fallback] All models exhausted for {label}")
     return last_error or f"{label} all models failed"
 
 def backoff_sleep(attempt: int) -> None:
@@ -590,18 +595,21 @@ class Yrambot(ForecastBot):
     def __init__(self, *args, client_spec: Optional[ClientSpecialisation] = None, **kwargs):
         llms = kwargs.pop("llms", None)
         if llms is None:
-            claude_llm       = GeneralLlm(model=_CLAUDE_MODEL,            temperature=0.15, timeout=90, allowed_tries=3)
-            gpt51_llm        = GeneralLlm(model=_GPT_MODEL_ALT,           temperature=0.15, timeout=90, allowed_tries=3)
-            sonar_pro_llm    = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL,  temperature=0.15, timeout=60, allowed_tries=3)
-            sonar_base_llm   = GeneralLlm(model=_PERPLEXITY_SONAR_BASE,   temperature=0.15, timeout=60, allowed_tries=3)
+            # All models are Perplexity — the only allowed provider on this account.
+            # sonar-reasoning-pro: deep chain-of-thought + live web (primary forecaster)
+            # sonar-pro:           best synthesis + live web (research & ensemble partner)
+            # sonar:               fast/cheap fallback for parsing and summarizing
+            primary_llm   = GeneralLlm(model=_PRIMARY_MODEL,   temperature=0.15, timeout=90, allowed_tries=3)
+            secondary_llm = GeneralLlm(model=_SECONDARY_MODEL, temperature=0.15, timeout=90, allowed_tries=3)
+            fast_llm      = GeneralLlm(model=_FAST_MODEL,      temperature=0.15, timeout=60, allowed_tries=2)
             llms = {
-                "default":     claude_llm,      # Claude Sonnet 4.5 — primary forecaster
-                "default_alt": gpt51_llm,       # GPT-5.1 — ensemble partner
-                "researcher":  sonar_pro_llm,   # Perplexity Sonar Pro — research
-                "parser":      GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=2),
-                "summarizer":  GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=2),
-                "perplexity":  sonar_pro_llm,   # Perplexity Sonar Pro — search source
-                "gpt5_search": sonar_base_llm,  # Perplexity Sonar — secondary search
+                "default":     primary_llm,    # sonar-reasoning-pro — primary forecaster
+                "default_alt": secondary_llm,  # sonar-pro — ensemble partner
+                "researcher":  secondary_llm,  # sonar-pro — research queries
+                "parser":      fast_llm,       # sonar — structured extraction
+                "summarizer":  fast_llm,       # sonar — summarization
+                "perplexity":  secondary_llm,  # sonar-pro — search source
+                "gpt5_search": primary_llm,    # sonar-reasoning-pro — secondary search
             }
         super().__init__(*args, llms=llms, **kwargs)
 
@@ -609,25 +617,26 @@ class Yrambot(ForecastBot):
         self._research_cache     = ResearchCache()
         self._validator          = ForecastValidator()
         self._analyser           = QuestionAnalyser(
-            GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=2)
+            GeneralLlm(model=_FAST_MODEL, temperature=0.15, timeout=60, allowed_tries=2)
         )
         self._research_meta:     Dict[str, Dict[str, Any]] = {}
         self._active_tournament: Optional[str] = None
 
-        sonar_fallback_llm = GeneralLlm(model=_PERPLEXITY_SONAR_BASE, temperature=0.1, timeout=60, allowed_tries=2)
+        # Source registry — Perplexity models cover both search sources
+        sonar_pro_llm      = GeneralLlm(model=_SECONDARY_MODEL,  temperature=0.1, timeout=60, allowed_tries=2)
+        sonar_reason_llm   = GeneralLlm(model=_PRIMARY_MODEL,    temperature=0.1, timeout=60, allowed_tries=2)
+
         self._sources  = SourceRegistry()
         tavily_src     = TavilySource(api_key=TAVILY_API_KEY or "", max_results=TAVILY_MAX_RESULTS)
         self._sources.register(tavily_src)
 
-        if not tavily_src.is_available():
-            self._sources.register(GptWebSearchSource(llm=sonar_fallback_llm))
-
-        perplexity_sonar = PerplexitySonarSource(llm=self.get_llm("perplexity", "llm"))
-        gpt5_search      = Gpt5SearchSource(llm=self.get_llm("gpt5_search", "llm"))
+        # Always register Perplexity sources regardless of Tavily availability
+        perplexity_sonar    = PerplexitySonarSource(llm=sonar_pro_llm)
+        perplexity_reason   = PerplexitySonarReasoningSource(llm=sonar_reason_llm)
         self._sources.register(perplexity_sonar)
-        self._sources.register(gpt5_search)
+        self._sources.register(perplexity_reason)
 
-        self._ext_cfg = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=EXTREMIZE_FACTOR, floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
+        self._ext_cfg           = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=EXTREMIZE_FACTOR,           floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
         self._ext_cfg_minibench = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=MINIBENCH_EXTREMIZE_FACTOR, floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
 
     def register_source(self, source: BaseSource) -> None: self._sources.register(source)
@@ -719,8 +728,8 @@ class Yrambot(ForecastBot):
             source_bundle   = await self._multi_source_research_bundle(question, profile, q_type)
             synthesized     = await self._synthesize_research(question, metaculus_block, source_bundle, profile, q_type)
 
-            # FIX 3: Degrade to a warning + raw bundle fallback instead of a hard
-            # crash when synthesis is thin but web research was actually retrieved.
+            # Degrade to a warning + raw bundle fallback instead of a hard crash
+            # when synthesis is thin but web research was actually retrieved.
             if REQUIRE_RESEARCH and not is_meaningful_research_text(synthesized):
                 if source_bundle and len(source_bundle.strip()) > 300:
                     logger.warning(f"[Research] Synthesis weak for Q{qid}, falling back to raw bundle.")
