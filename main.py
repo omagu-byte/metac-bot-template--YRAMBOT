@@ -835,6 +835,52 @@ def backoff_sleep(attempt: int) -> None:
     time.sleep(base + random.uniform(0.0, base * 0.25))
 
 
+async def diagnose_api_health() -> Dict[str, Any]:
+    """
+    Diagnostic function to check API connectivity and model availability.
+    Useful for troubleshooting NotFoundError and other API issues.
+    """
+    diagnostics = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "models_checked": [],
+        "api_keys_present": {
+            "OPENROUTER": bool(os.getenv("OPENROUTER_API_KEY")),
+            "TAVILY": bool(TAVILY_API_KEY),
+            "METACULUS_TOKEN": bool(os.getenv("METACULUS_TOKEN")),
+        }
+    }
+    
+    # Test each model in the fallback chain
+    for model in _FREE_MODEL_CHAIN:
+        try:
+            logger.info(f"[Diagnostics] Testing model: {model}")
+            llm = GeneralLlm(model=model, temperature=0.15, timeout=30, allowed_tries=1)
+            result = await asyncio.wait_for(llm.invoke("Say 'OK'"), timeout=30)
+            
+            diagnostics["models_checked"].append({
+                "model": model,
+                "status": "available" if "ok" in result.lower() else "error",
+                "response": result[:100] if result else "No response"
+            })
+        except asyncio.TimeoutError:
+            diagnostics["models_checked"].append({
+                "model": model,
+                "status": "timeout",
+                "response": "Request timed out"
+            })
+        except Exception as e:
+            error_type = type(e).__name__
+            diagnostics["models_checked"].append({
+                "model": model,
+                "status": "error",
+                "error_type": error_type,
+                "response": str(e)[:100]
+            })
+    
+    logger.info(f"[Diagnostics] Health check complete: {json.dumps(diagnostics, indent=2)}")
+    return diagnostics
+
+
 @dataclass
 class ClientSpecialisation:
     domain_focus:       List[str] = field(default_factory=list)
@@ -1015,10 +1061,27 @@ async def invoke_with_free_model_fallback(prompt: str, temperature: float = 0.15
                 return result
             last_error = result
         except Exception as e:
+            error_str = str(e).lower()
+            error_type = type(e).__name__
+            
+            # Log NotFoundError specifically
+            if "notfound" in error_str or error_type == "NotFoundError":
+                logger.error(
+                    f"[Free Model Fallback] Model not found on OpenRouter: {model}. "
+                    f"Error: {e}. This may indicate the model endpoint does not exist or has been removed."
+                )
+            else:
+                logger.warning(f"[Free Model Fallback] {model} failed ({error_type}): {e}")
+            
             last_error = str(e)
-            logger.warning(f"[Free Model Fallback] {model} failed: {e}")
             continue
-    logger.error(f"[Free Model Fallback] All models exhausted for {label}")
+    
+    logger.error(f"[Free Model Fallback] All models exhausted for {label}. Last error: {last_error}")
+    
+    # Return a more informative error message
+    if isinstance(last_error, str) and ("notfound" in last_error.lower() or "404" in last_error):
+        return f"{label} error: Model endpoint not found. Please verify OpenRouter model availability."
+    
     return last_error or f"{label} all models failed"
 
 def backoff_sleep(attempt: int) -> None:
@@ -1232,10 +1295,28 @@ class Yrambot(ForecastBot):
             f"Question: {question.question_text}\nSources:\n{metaculus_block}\n"
             f"[Web Research]\n{source_bundle}"
         )
-        result = await invoke_with_free_model_fallback(
-            prompt, temperature=0.15, timeout_s=LLM_TIMEOUT_S, label="research_synthesis"
-        )
-        return result.strip() if result else ""
+        try:
+            result = await invoke_with_free_model_fallback(
+                prompt, temperature=0.15, timeout_s=LLM_TIMEOUT_S, label="research_synthesis"
+            )
+            
+            # Check if result contains an error
+            if result and ("error" in result.lower() or "not found" in result.lower()):
+                logger.warning(f"[Research Synthesis] Model returned error: {result}")
+                # If synthesis failed but we have source bundle, use raw bundle
+                if source_bundle and len(source_bundle.strip()) > 300:
+                    logger.info("[Research Synthesis] Falling back to raw source bundle")
+                    return source_bundle[:2400]
+                return ""
+            
+            return result.strip() if result else ""
+        except Exception as e:
+            logger.error(f"[Research Synthesis] Unexpected error during synthesis: {e}", exc_info=True)
+            # If synthesis completely fails but we have source bundle, use it as fallback
+            if source_bundle and len(source_bundle.strip()) > 300:
+                logger.info("[Research Synthesis] Using raw source bundle due to synthesis failure")
+                return source_bundle[:2400]
+            return ""
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
@@ -1276,14 +1357,29 @@ class Yrambot(ForecastBot):
                 question, metaculus_block, source_bundle, profile, q_type
             )
 
-            # Degrade to a warning + raw bundle fallback instead of a hard crash
-            # when synthesis is thin but web research was actually retrieved.
-            if REQUIRE_RESEARCH and not is_meaningful_research_text(synthesized):
-                if source_bundle and len(source_bundle.strip()) > 300:
-                    logger.warning(f"[Research] Synthesis weak for Q{qid}, falling back to raw bundle.")
-                    synthesized = source_bundle[:2400]
-                else:
-                    raise RuntimeError(f"Insufficient synthesized research for Q{qid}.")
+            # Improved fallback logic: handle API errors, thin synthesis, and missing research
+            if not is_meaningful_research_text(synthesized):
+                # If synthesis failed due to API error (NotFoundError, etc)
+                if "error" in synthesized.lower() or "not found" in synthesized.lower():
+                    logger.error(f"[Research] API error during synthesis for Q{qid}: {synthesized}")
+                    if source_bundle and len(source_bundle.strip()) > 300:
+                        logger.warning(f"[Research] Using raw web bundle as fallback due to API error.")
+                        synthesized = source_bundle[:2400]
+                    elif not REQUIRE_RESEARCH:
+                        logger.warning(f"[Research] No fallback available for Q{qid}, proceeding without research.")
+                        synthesized = f"Note: Research synthesis unavailable due to API error. {synthesized}"
+                    else:
+                        raise RuntimeError(f"Research synthesis failed with API error for Q{qid}: {synthesized}")
+                # If synthesis is weak but we have source bundle
+                elif source_bundle and len(source_bundle.strip()) > 300:
+                    if REQUIRE_RESEARCH:
+                        logger.warning(f"[Research] Synthesis weak for Q{qid}, falling back to raw bundle.")
+                        synthesized = source_bundle[:2400]
+                    else:
+                        logger.info(f"[Research] Synthesis weak but allowing to proceed (REQUIRE_RESEARCH=false)")
+                # If no research at all and it's required
+                elif REQUIRE_RESEARCH:
+                    raise RuntimeError(f"Insufficient research available for Q{qid}. No synthesis or source bundle.")
 
             final = (
                 f"{fin_data}{metaculus_block}\n\n[Research Summary]\n{synthesized}"
