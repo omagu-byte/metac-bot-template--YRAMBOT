@@ -43,7 +43,13 @@ from forecasting_tools import (
     structure_output,
 )
 from tavily import TavilyClient
-from newsapi import NewsApiClient
+
+try:
+    from newsapi import NewsApiClient
+    NEWSAPI_AVAILABLE = True
+except ImportError:
+    NewsApiClient = None  # type: ignore
+    NEWSAPI_AVAILABLE = False
 
 dotenv.load_dotenv()
 
@@ -315,7 +321,7 @@ class NewsApiSource(BaseSource):
 
     def __init__(self, api_key: str):
         self._api_key = api_key
-        self._client  = NewsApiClient(api_key=api_key) if api_key else None
+        self._client  = NewsApiClient(api_key=api_key) if (api_key and NEWSAPI_AVAILABLE) else None
 
     def is_available(self) -> bool:
         return bool(self._api_key and self._client)
