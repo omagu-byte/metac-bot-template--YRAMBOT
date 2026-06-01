@@ -76,7 +76,6 @@ _FAST_MODEL             = "openrouter/perplexity/sonar"
 _RESEARCH_MODEL         = "openrouter/perplexity/sonar-pro"
 
 # Free model chain — sonar is cheapest Perplexity tier
->>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
 _FREE_MODEL             = "openrouter/perplexity/sonar"
 _FREE_MODEL_CHAIN       = [
     "openrouter/perplexity/sonar",
