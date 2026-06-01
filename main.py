@@ -47,6 +47,7 @@ from newsapi import NewsApiClient
 
 dotenv.load_dotenv()
 
+<<<<<<< HEAD
 # ─────────────────────────────────────────────
 # Environment & API Keys
 # ─────────────────────────────────────────────
@@ -61,11 +62,25 @@ _CLAUDE_MODEL           = "openrouter/anthropic/claude-sonnet-4.6"
 _GPT_MODEL_ALT          = "openrouter/openai/gpt-5.1"
 _PERPLEXITY_SONAR_MODEL = "openrouter/perplexity/sonar-pro"
 _PERPLEXITY_SONAR_BASE  = "openrouter/perplexity/sonar"
+=======
+# ---------------------------------------------------------------------------
+# Model strings — ALL using Perplexity via OpenRouter (only allowed provider)
+# ---------------------------------------------------------------------------
+# Primary forecaster: sonar-reasoning-pro has chain-of-thought + live web search
+_PRIMARY_MODEL          = "openrouter/perplexity/sonar-reasoning-pro"
+# Secondary/ensemble: sonar-pro for synthesis and research
+_SECONDARY_MODEL        = "openrouter/perplexity/sonar-pro"
+# Fast/cheap: sonar for parsing, summarizing, quick tasks
+_FAST_MODEL             = "openrouter/perplexity/sonar"
+# Research: sonar-pro with live web context
+_RESEARCH_MODEL         = "openrouter/perplexity/sonar-pro"
+
+# Free model chain — sonar is cheapest Perplexity tier
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
 _FREE_MODEL             = "openrouter/perplexity/sonar"
 _FREE_MODEL_CHAIN       = [
-    "openrouter/google/gemma-3-4b-it:free",
-    "openrouter/meta-llama/llama-3.1-8b-instruct:free",
-    "openrouter/free",
+    "openrouter/perplexity/sonar",
+    "openrouter/perplexity/sonar-pro",
 ]
 # Committee models for pre-mortem voting (GPT-5 x2, Claude x1)
 _COMMITTEE_MODELS = [
@@ -168,6 +183,11 @@ class QuestionAnalyser:
             )
         except Exception as exc:
             logger.warning(f"[Analyser] classify failed: {exc}")
+<<<<<<< HEAD
+=======
+            # Return neutral confidence so a model error doesn't cascade into a
+            # confidence-gate failure downstream when research is present.
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
             return QuestionProfile(confidence_in_profile=0.5)
 
 
@@ -295,6 +315,7 @@ class TavilySource(BaseSource):
             return f"Tavily error: {exc}"
 
 
+<<<<<<< HEAD
 class NewsApiSource(BaseSource):
     """NewsAPI source — from HybridPreMortemBot."""
     name = "newsapi"
@@ -324,7 +345,10 @@ class NewsApiSource(BaseSource):
             return f"NewsAPI failed: {exc}"
 
 
+=======
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
 class PerplexitySonarSource(BaseSource):
+    """Primary web-search source using Perplexity sonar-pro (live web context)."""
     name = "perplexity_sonar_pro"
 
     def __init__(self, llm: GeneralLlm):
@@ -339,15 +363,24 @@ class PerplexitySonarSource(BaseSource):
             "Include recent developments, key facts, and relevant sources. Max 800 words."
         )
         try:
-            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "perplexity_sonar")
+            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "perplexity_sonar_pro")
             return raw.strip() if raw and len(raw.strip()) > 80 else ""
         except Exception as exc:
+<<<<<<< HEAD
             return f"Perplexity Sonar error: {exc}"
 
 
 class Gpt5SearchSource(BaseSource):
     name = "gpt5_web_search"
 
+=======
+            return f"Perplexity Sonar Pro error: {exc}"
+
+
+class PerplexitySonarReasoningSource(BaseSource):
+    """Secondary source using Perplexity sonar-reasoning-pro for deeper analysis."""
+    name = "perplexity_sonar_reasoning"
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
     def __init__(self, llm: GeneralLlm):
         self._llm = llm
 
@@ -356,15 +389,25 @@ class Gpt5SearchSource(BaseSource):
 
     async def fetch(self, query: str) -> str:
         prompt = (
+<<<<<<< HEAD
             f"Conduct a web search analysis for: {query}\n"
             "Provide current information, trends, and relevant background. "
             "Focus on factual accuracy. Max 700 words."
+=======
+            f"Conduct a deep research analysis for: {query}\n"
+            "Provide current information, trends, and relevant background. "
+            "Focus on factual accuracy and cite sources where possible. Max 700 words."
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
         )
         try:
-            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "gpt5_search")
+            raw = await with_timeout(self._llm.invoke(prompt), LLM_TIMEOUT_S, "perplexity_reasoning")
             return raw.strip() if raw and len(raw.strip()) > 80 else ""
         except Exception as exc:
+<<<<<<< HEAD
             return f"GPT-5 search error: {exc}"
+=======
+            return f"Perplexity Reasoning error: {exc}"
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
 
 
 class GptWebSearchSource(BaseSource):
@@ -458,11 +501,18 @@ class ForecastValidator:
         classifier_score = profile.confidence_in_profile
         evidence_score   = min(1.0, research_length / 3000)
         signal_score     = abs(prediction_value - 0.5) * 2.5 if isinstance(prediction_value, float) else 0.5
+<<<<<<< HEAD
         # Evidence carries most weight so a single classifier failure cannot
         # push the total below the 0.65 gate when research is present.
         return round(min(1.0, max(0.0,
             0.25 * classifier_score + 0.55 * evidence_score + 0.20 * signal_score
         )), 3)
+=======
+        # Rebalanced: evidence carries 0.55 weight so a classifier failure
+        # (confidence_in_profile=0.0) can't push the total below the 0.65 gate
+        # on its own when research is present.
+        return round(min(1.0, max(0.0, 0.25 * classifier_score + 0.55 * evidence_score + 0.20 * signal_score)), 3)
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
 
     def validate(
         self,
@@ -847,6 +897,198 @@ class UnifiedForecastBot(ForecastBot):
       - Free-model fallback chain for parsing / repair
     """
 
+<<<<<<< HEAD
+=======
+
+@dataclass
+class ExtremizationConfig:
+    enabled: bool  = True
+    factor:  float = EXTREMIZE_FACTOR
+    floor:   float = EXTREMIZE_FLOOR
+    ceil:    float = EXTREMIZE_CEIL
+
+def _logit(p: float) -> float:
+    p = min(1.0 - 1e-12, max(1e-12, p))
+    return math.log(p / (1.0 - p))
+
+def _sigmoid(x: float) -> float:
+    if x >= 0: return 1.0 / (1.0 + math.exp(-x))
+    return math.exp(x) / (1.0 + math.exp(x))
+
+def extremize_probability(p: float, cfg: ExtremizationConfig) -> float:
+    if not cfg.enabled: return max(cfg.floor, min(cfg.ceil, p))
+    return max(cfg.floor, min(cfg.ceil, _sigmoid(_logit(p) * cfg.factor)))
+
+def apply_tail_fattening(pts: List[Percentile], factor: float = 1.20) -> List[Percentile]:
+    p50_val = next((p.value for p in pts if abs(float(p.percentile) - 0.5) < 1e-9), None)
+    if p50_val is None:
+        l_val = next((p.value for p in pts if float(p.percentile) < 0.5), None)
+        r_val = next((p.value for p in pts if float(p.percentile) > 0.5), None)
+        if l_val is not None and r_val is not None: p50_val = (l_val + r_val) / 2.0
+        else: return pts
+    for p in pts:
+        if float(p.percentile) < 0.5: p.value = p50_val - (p50_val - p.value) * factor
+        elif float(p.percentile) > 0.5: p.value = p50_val + (p.value - p50_val) * factor
+    pts.sort(key=lambda x: float(x.percentile))
+    for i in range(1, len(pts)):
+        if pts[i].value < pts[i - 1].value: pts[i].value = pts[i - 1].value
+    return pts
+
+def clamp01(p: float) -> float: return float(max(MIN_P, min(MAX_P, float(p))))
+
+def extract_question_id(question: MetaculusQuestion) -> str:
+    for attr in ("id", "question_id", "questionId"):
+        try:
+            qid = getattr(question, attr, None)
+            if isinstance(qid, (int, str)) and str(qid).isdigit(): return str(qid)
+        except Exception: pass
+    for attr in ("url", "page_url", "question_url", "link"):
+        try:
+            url = str(getattr(question, attr, "") or "")
+            m = re.search(r"/questions/(\d+)(?:/|$)", url)
+            if m: return m.group(1)
+        except Exception: pass
+    return "unknown"
+
+def safe_community_prediction(question: MetaculusQuestion) -> Optional[float]:
+    try:
+        for attr in ("community_prediction", "prediction"):
+            pred = getattr(question, attr, None)
+            if pred is not None and isinstance(pred, (int, float)): return float(pred)
+    except Exception: pass
+    return None
+
+def is_meaningful_research_text(txt: str) -> bool:
+    if not txt: return False
+    if "failed:" in txt.lower() or "error:" in txt.lower() or "timeout" in txt.lower(): return False
+    return len(txt.strip()) > 160
+
+def interpolate_missing_percentiles(reported: List[Percentile], target_percentiles: List[float]) -> List[Percentile]:
+    if not reported: return [Percentile(percentile=p, value=0.0) for p in target_percentiles]
+    sorted_rep = sorted(reported, key=lambda x: x.percentile)
+    xs = [float(p.percentile) for p in sorted_rep]
+    ys = [float(p.value) for p in sorted_rep]
+    out: List[Percentile] = []
+    for tp in target_percentiles:
+        if tp in xs: val = ys[xs.index(tp)]
+        else:
+            from bisect import bisect_left
+            i = bisect_left(xs, tp)
+            if i == 0: val = ys[0]
+            elif i == len(xs): val = ys[-1]
+            else:
+                x0, x1, y0, y1 = xs[i - 1], xs[i], ys[i - 1], ys[i]
+                val = y0 + (y1 - y0) * (tp - x0) / (x1 - x0) if x1 != x0 else y0
+        out.append(Percentile(percentile=float(tp), value=float(val)))
+    return out
+
+def enforce_numeric_constraints(percentiles: List[Percentile], question: NumericQuestion) -> List[Percentile]:
+    lower = -np.inf if getattr(question, "open_lower_bound", False) else getattr(question, "lower_bound", None)
+    upper =  np.inf if getattr(question, "open_upper_bound", False) else getattr(question, "upper_bound", None)
+    if lower is None: lower = getattr(question, "nominal_lower_bound", None)
+    if upper is None: upper = getattr(question, "nominal_upper_bound", None)
+    if lower is None: lower = -np.inf
+    if upper is None: upper = np.inf
+
+    bounded = [
+        Percentile(percentile=float(p.percentile), value=float(max(lower, min(upper, p.value))))
+        for p in percentiles
+    ]
+
+    srt  = sorted(bounded, key=lambda x: x.percentile)
+    vals = [p.value for p in srt]
+    for i in range(1, len(vals)):
+        if vals[i] < vals[i - 1]: vals[i] = vals[i - 1]
+
+    return [Percentile(percentile=srt[i].percentile, value=float(vals[i])) for i in range(len(vals))]
+
+def derive_numeric_fallback_bounds(question: NumericQuestion, anchor: Optional[float]) -> Tuple[float, float]:
+    lb = getattr(question, "lower_bound", None)
+    ub = getattr(question, "upper_bound", None)
+    if getattr(question, "open_lower_bound", False): lb = None
+    if getattr(question, "open_upper_bound", False): ub = None
+    if lb is None: lb = getattr(question, "nominal_lower_bound", None)
+    if ub is None: ub = getattr(question, "nominal_upper_bound", None)
+    if lb is not None and ub is not None and float(ub) > float(lb): return float(lb), float(ub)
+    if isinstance(anchor, (int, float)):
+        a = float(anchor)
+        return (a * 0.25, a * 3.0) if a > 0 else (a - 1.0, a + 1.0)
+    return -1e9, 1e9
+
+def log_forecast_for_calibration(question, prediction_value, reasoning, models_used, research_used, searchers_used):
+    entry = {
+        "timestamp":        datetime.utcnow().isoformat(),
+        "question_id":      extract_question_id(question),
+        "question_type":    question.__class__.__name__,
+        "prediction_value": prediction_value,
+        "models_used":      models_used,
+        "research_used":    research_used,
+    }
+    try:
+        with open(CALIBRATION_LOG_FILE, "a") as f: f.write(json.dumps(entry) + "\n")
+    except Exception: pass
+
+async def with_timeout(coro, seconds: float, label: str) -> str:
+    try: return await asyncio.wait_for(coro, timeout=seconds)
+    except asyncio.TimeoutError: return f"{label} timed out after {seconds}s"
+    except Exception as e: return f"{label} error: {e}"
+
+async def invoke_with_free_model_fallback(prompt: str, temperature: float = 0.15, timeout_s: float = 60, label: str = "free_invoke") -> str:
+    """Try Perplexity models in fallback chain. Returns result from first successful model."""
+    last_error = None
+    for model_idx, model in enumerate(_FREE_MODEL_CHAIN):
+        try:
+            llm = GeneralLlm(model=model, temperature=temperature, timeout=timeout_s, allowed_tries=2)
+            result = await with_timeout(llm.invoke(prompt), timeout_s, f"{label}_{model_idx}")
+            if result and not result.startswith(label) and "error" not in result.lower() and "timed out" not in result.lower():
+                logger.info(f"[Free Model Fallback] Success with {model}")
+                return result
+            last_error = result
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"[Free Model Fallback] {model} failed: {e}")
+            continue
+    logger.error(f"[Free Model Fallback] All models exhausted for {label}")
+    return last_error or f"{label} all models failed"
+
+def backoff_sleep(attempt: int) -> None:
+    base   = min(RETRY_MAX_S, RETRY_BASE_S * (2 ** attempt))
+    time.sleep(base + random.uniform(0.0, base * 0.25))
+
+def build_reasoning_block(question, forecast_text: str, base_rate_text: str,
+                          methodology_text: str, strategy: str, profile: QuestionProfile,
+                          searchers_used: List[str], minibench: bool, ext_factor: float) -> str:
+    minibench_tag = f" (aggressive mode)" if minibench else ""
+    return clean_indents(f"""
+    My forecast: {forecast_text}
+    
+    I anchored on a base rate of {base_rate_text} and adjusted based on recent evidence. 
+    The question falls in {profile.domain}; my analysis suggests the key uncertainty lies in {profile.geography or 'broader trends'}.
+    
+    {methodology_text}{minibench_tag}
+    """).strip()
+
+_ARITH_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$")
+def _safe_eval(expr: str) -> Optional[float]:
+    m = _ARITH_RE.match(expr.strip())
+    if not m: return None
+    a, op, b = float(m[1]), m[2], float(m[3])
+    if op == "+": return a + b
+    if op == "-": return a - b
+    if op == "*": return a * b
+    if op == "/": return (a / b) if abs(b) > 1e-12 else None
+    return None
+
+def sanitize_numeric_json(text: str) -> str:
+    def repl(m: re.Match) -> str:
+        raw = m.group(2).strip()
+        v   = _safe_eval(raw)
+        return m.group(1) + (str(v) if v is not None else raw)
+    return re.sub(r'("percentile"\s*:\s*)([^,\]\}\n]+)', repl, text)
+
+
+class Yrambot(ForecastBot):
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
     _max_concurrent_questions            = MAX_CONCURRENT_QUESTIONS
     _concurrency_limiter                 = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
@@ -858,6 +1100,7 @@ class UnifiedForecastBot(ForecastBot):
     def __init__(self, *args, client_spec: Optional[ClientSpecialisation] = None, **kwargs):
         llms = kwargs.pop("llms", None)
         if llms is None:
+<<<<<<< HEAD
             claude_llm     = GeneralLlm(model=_CLAUDE_MODEL,            temperature=0.15, timeout=90, allowed_tries=3)
             gpt51_llm      = GeneralLlm(model=_GPT_MODEL_ALT,           temperature=0.15, timeout=90, allowed_tries=3)
             sonar_pro_llm  = GeneralLlm(model=_PERPLEXITY_SONAR_MODEL,  temperature=0.15, timeout=60, allowed_tries=3)
@@ -878,18 +1121,51 @@ class UnifiedForecastBot(ForecastBot):
         self._validator        = ForecastValidator()
         self._analyser         = QuestionAnalyser(
             GeneralLlm(model=_FREE_MODEL, temperature=0.15, timeout=60, allowed_tries=2)
+=======
+            # All models are Perplexity — the only allowed provider on this account.
+            # sonar-reasoning-pro: deep chain-of-thought + live web (primary forecaster)
+            # sonar-pro:           best synthesis + live web (research & ensemble partner)
+            # sonar:               fast/cheap fallback for parsing and summarizing
+            primary_llm   = GeneralLlm(model=_PRIMARY_MODEL,   temperature=0.15, timeout=90, allowed_tries=3)
+            secondary_llm = GeneralLlm(model=_SECONDARY_MODEL, temperature=0.15, timeout=90, allowed_tries=3)
+            fast_llm      = GeneralLlm(model=_FAST_MODEL,      temperature=0.15, timeout=60, allowed_tries=2)
+            llms = {
+                "default":     primary_llm,    # sonar-reasoning-pro — primary forecaster
+                "default_alt": secondary_llm,  # sonar-pro — ensemble partner
+                "researcher":  secondary_llm,  # sonar-pro — research queries
+                "parser":      fast_llm,       # sonar — structured extraction
+                "summarizer":  fast_llm,       # sonar — summarization
+                "perplexity":  secondary_llm,  # sonar-pro — search source
+                "gpt5_search": primary_llm,    # sonar-reasoning-pro — secondary search
+            }
+        super().__init__(*args, llms=llms, **kwargs)
+
+        self._client_spec        = client_spec or ClientSpecialisation()
+        self._research_cache     = ResearchCache()
+        self._validator          = ForecastValidator()
+        self._analyser           = QuestionAnalyser(
+            GeneralLlm(model=_FAST_MODEL, temperature=0.15, timeout=60, allowed_tries=2)
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
         )
         self._research_meta:   Dict[str, Dict[str, Any]] = {}
         self._active_tournament: Optional[str] = None
 
+<<<<<<< HEAD
         # ── Research sources ──────────────────────────────────────────────
         sonar_fallback = GeneralLlm(model=_PERPLEXITY_SONAR_BASE, temperature=0.1, timeout=60, allowed_tries=2)
+=======
+        # Source registry — Perplexity models cover both search sources
+        sonar_pro_llm      = GeneralLlm(model=_SECONDARY_MODEL,  temperature=0.1, timeout=60, allowed_tries=2)
+        sonar_reason_llm   = GeneralLlm(model=_PRIMARY_MODEL,    temperature=0.1, timeout=60, allowed_tries=2)
+
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
         self._sources  = SourceRegistry()
 
         # Tavily (primary web search)
         tavily_src = TavilySource(api_key=TAVILY_API_KEY or "", max_results=TAVILY_MAX_RESULTS)
         self._sources.register(tavily_src)
 
+<<<<<<< HEAD
         # NewsAPI (from HybridPreMortemBot)
         if NEWSAPI_API_KEY:
             self._sources.register(NewsApiSource(api_key=NEWSAPI_API_KEY))
@@ -904,6 +1180,16 @@ class UnifiedForecastBot(ForecastBot):
         # ── Extremization configs ─────────────────────────────────────────
         self._ext_cfg          = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=EXTREMIZE_FACTOR,           floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
         self._ext_cfg_minibench= ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=MINIBENCH_EXTREMIZE_FACTOR, floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
+=======
+        # Always register Perplexity sources regardless of Tavily availability
+        perplexity_sonar    = PerplexitySonarSource(llm=sonar_pro_llm)
+        perplexity_reason   = PerplexitySonarReasoningSource(llm=sonar_reason_llm)
+        self._sources.register(perplexity_sonar)
+        self._sources.register(perplexity_reason)
+
+        self._ext_cfg           = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=EXTREMIZE_FACTOR,           floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
+        self._ext_cfg_minibench = ExtremizationConfig(enabled=EXTREMIZE_ENABLED, factor=MINIBENCH_EXTREMIZE_FACTOR, floor=EXTREMIZE_FLOOR, ceil=EXTREMIZE_CEIL)
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
 
     def register_source(self, source: BaseSource) -> None:
         self._sources.register(source)
@@ -1066,6 +1352,11 @@ class UnifiedForecastBot(ForecastBot):
                 question, metaculus_block, source_bundle, profile, q_type
             )
 
+<<<<<<< HEAD
+=======
+            # Degrade to a warning + raw bundle fallback instead of a hard crash
+            # when synthesis is thin but web research was actually retrieved.
+>>>>>>> 8ac85e2bcefa4d87f5eb857342fafe0c02625ccd
             if REQUIRE_RESEARCH and not is_meaningful_research_text(synthesized):
                 if source_bundle and len(source_bundle.strip()) > 300:
                     logger.warning(f"[Research] Synthesis weak for Q{qid}, falling back to raw bundle.")
