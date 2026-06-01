@@ -108,6 +108,7 @@ EXTREMIZE_FACTOR           = float(os.getenv("EXTREMIZE_FACTOR",    "1.45"))
 EXTREMIZE_FLOOR            = float(os.getenv("EXTREMIZE_FLOOR",     "0.02"))
 EXTREMIZE_CEIL             = float(os.getenv("EXTREMIZE_CEIL",      "0.98"))
 MINIBENCH_EXTREMIZE_FACTOR = float(os.getenv("MINIBENCH_EXTREMIZE_FACTOR", "4.00"))
+MINIBENCH_EXTREMIZE_FLOOR  = float(os.getenv("MINIBENCH_EXTREMIZE_FLOOR", "0.02"))
 CROWD_BLEND_MIXED          = float(os.getenv("CROWD_BLEND_MIXED",   "0.65"))
 MIN_P                      = float(os.getenv("MIN_P",               "0.01"))
 MAX_P                      = float(os.getenv("MAX_P",               "0.99"))
@@ -1800,6 +1801,11 @@ class Yrambot(ForecastBot):
         if summary := self._validator.summary():
             logger.info(f"[UnifiedBot] Validation summary:\n{json.dumps(summary, indent=2)}")
         return reports
+
+
+# Alias the implemented Yrambot as UnifiedForecastBot for backwards compatibility.
+# The old UnifiedForecastBot class declaration is empty due to an earlier merge issue.
+UnifiedForecastBot = Yrambot
 
 
 # ═════════════════════════════════════════════
