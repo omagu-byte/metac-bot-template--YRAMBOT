@@ -1809,6 +1809,13 @@ class Yrambot(ForecastBot):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run UnifiedForecastBot.")
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["run", "test_questions"],
+        default="run",
+        help="Run mode. `test_questions` is accepted for backwards compatibility.",
+    )
+    parser.add_argument(
         "--tournament-ids",
         nargs="+",
         type=str,
@@ -1822,6 +1829,9 @@ if __name__ == "__main__":
         ],
     )
     args = parser.parse_args()
+
+    if args.mode == "test_questions":
+        logger.info("Running in test_questions mode (backwards compatible).")
 
     bot = UnifiedForecastBot(
         client_spec=ClientSpecialisation(),
