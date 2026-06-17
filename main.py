@@ -58,7 +58,7 @@ class Yrambot(ForecastBot):
             "default":    "openrouter/openai/gpt-5.5",
             "parser":     "openrouter/openai/gpt-4.1-mini",
             # ── Single researcher using Sonar's built-in web search ──
-            "researcher": "openrouter/perplexity/sonar",
+            "researcher": "openrouter/perplexity/sonar-pro",
             "summarizer": "openrouter/openai/gpt-4.1-mini",
         }
 
@@ -230,7 +230,7 @@ class Yrambot(ForecastBot):
         models = [
             "openrouter/openai/gpt-5.1",
             "openrouter/openai/gpt-5.4",
-            "openrouter/perplexity/sonar",   # ← replaces claude-sonnet-4.5
+            "openrouter/perplexity/sonar-pro",   
         ]
         predictions = []
         reasonings = []
@@ -354,7 +354,7 @@ if __name__ == "__main__":
         research_reports_per_question=1,
         predictions_per_research_report=1,
         publish_reports_to_metaculus=True,
-        skip_previously_forecasted_questions=True,
+        skip_previously_forecasted_questions=False,
     )
 
     all_reports = []
