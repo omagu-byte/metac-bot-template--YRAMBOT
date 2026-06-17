@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from pydantic import model_validator
 
@@ -25,6 +25,20 @@ from forecasting_tools import (
     structure_output,
 )
 
+# pip install tavily-python exa-py
+try:
+    from tavily import AsyncTavilyClient
+    TAVILY_AVAILABLE = bool(os.environ.get("TAVILY_API_KEY"))
+except ImportError:
+    TAVILY_AVAILABLE = False
+
+try:
+    from exa_py import Exa
+    EXA_AVAILABLE = bool(os.environ.get("EXA_API_KEY"))
+except ImportError:
+    EXA_AVAILABLE = False
+
+
 def median(lst: List[float]) -> float:
     if not lst:
         raise ValueError("median() arg is an empty sequence")
@@ -36,6 +50,7 @@ def median(lst: List[float]) -> float:
     else:
         return float(sorted_lst[mid])
 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -43,11 +58,84 @@ logging.basicConfig(
 logger = logging.getLogger("Yrambot")
 
 
+# ------------------------------------------------------------------
+# Stand-alone research helpers (called before LLM synthesis)
+# ------------------------------------------------------------------
+
+async def _research_tavily(query: str) -> Optional[str]:
+    """Tavily: LLM-optimized search, returns scored snippets + AI answer."""
+    if not TAVILY_AVAILABLE:
+        return None
+    try:
+        client = AsyncTavilyClient(api_key=os.environ["TAVILY_API_KEY"])
+        resp = await client.search(
+            query=query,
+            search_depth="advanced",   # deeper crawl, worth the cost for forecasting
+            max_results=6,
+            include_answer=True,       # ask Tavily to synthesize an answer too
+        )
+        lines = []
+        if resp.get("answer"):
+            lines.append(f"Tavily answer: {resp['answer']}\n")
+        for r in resp.get("results", []):
+            score = r.get("score", 0)
+            if score >= 0.4:           # filter low-relevance noise
+                lines.append(f"[{score:.2f}] {r['title']}\n{r['url']}\n{r.get('content','')}\n")
+        return "\n".join(lines) if lines else None
+    except Exception as e:
+        logger.warning(f"Tavily failed: {e}")
+        return None
+
+
+async def _research_exa(query: str) -> Optional[str]:
+    """Exa: neural/semantic search — strong on multi-hop research queries."""
+    if not EXA_AVAILABLE:
+        return None
+    try:
+        # exa_py is sync; run in thread to avoid blocking the event loop
+        exa = Exa(api_key=os.environ["EXA_API_KEY"])
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: exa.search_and_contents(
+                query,
+                num_results=5,
+                use_autoprompt=True,   # Exa rewrites query for better recall
+                text={"max_characters": 1500},
+            )
+        )
+        lines = []
+        for r in resp.results:
+            lines.append(f"{r.title}\n{r.url}\n{r.text}\n")
+        return "\n".join(lines) if lines else None
+    except Exception as e:
+        logger.warning(f"Exa failed: {e}")
+        return None
+
+
+async def _research_sonar(llm, query: str, today_str: str) -> Optional[str]:
+    """Perplexity Sonar-Pro fallback — LLM with built-in live search."""
+    try:
+        prompt = clean_indents(f"""
+            You are a research assistant with live web-search capability.
+            Today is {today_str}.
+
+            {query}
+
+            Be factual. Cite sources where possible.
+            Output a concise research summary for a professional forecaster.
+        """)
+        return await llm.invoke(prompt)
+    except Exception as e:
+        logger.warning(f"Sonar-Pro fallback failed: {e}")
+        return None
+
+
 class Yrambot(ForecastBot):
     """
     Conservative hybrid forecaster.
-    Researcher: Perplexity Sonar (live web search).
-    Committee: GPT-5, GPT-4o, Perplexity Sonar (fallback).
+    Research chain: Tavily → Exa → Perplexity Sonar-Pro (first success wins).
+    Committee: GPT-5.1, GPT-5.4, Perplexity Sonar-Pro.
     """
 
     _max_concurrent_questions = 1
@@ -57,8 +145,7 @@ class Yrambot(ForecastBot):
         return {
             "default":    "openrouter/openai/gpt-5.5",
             "parser":     "openrouter/openai/gpt-4.1-mini",
-            # ── Single researcher using Sonar's built-in web search ──
-            "researcher": "openrouter/perplexity/sonar-pro",
+            "researcher": "openrouter/perplexity/sonar-pro",   # Sonar as last-resort researcher
             "summarizer": "openrouter/openai/gpt-4.1-mini",
         }
 
@@ -66,39 +153,86 @@ class Yrambot(ForecastBot):
         async with self._concurrency_limiter:
             today_str = datetime.now().strftime("%Y-%m-%d")
 
-            sonar_prompt = clean_indents(f"""
-                You are a research assistant with live web-search capability.
-                Today is {today_str}. Use your search tools to find the most
-                recent, relevant information for the forecasting question below.
+            # Build a rich query string from question fields
+            query = clean_indents(f"""
+                Forecasting question (resolve by analyzing current events):
+                {question.question_text}
 
-                Question: {question.question_text}
-                Background: {question.background_info or 'None provided'}
+                Background: {question.background_info or 'None'}
                 Resolution criteria: {question.resolution_criteria or 'Standard'}
                 Fine print: {question.fine_print or 'None'}
+                Today: {today_str}
 
-                Focus on:
-                - Current status of the topic as of today ({today_str})
-                - Recent news, data releases, or events that affect the outcome
-                - Scheduled events (elections, product launches, policy deadlines)
-                  that fall before the resolution date
-                - Base rates and historical analogues
-                - Time remaining until resolution and whether the status quo is
-                  likely to hold
+                Find: current status, recent news, scheduled events before resolution,
+                base rates, and any data that affects the probability of this outcome.
+            """)
 
-                Be factual. Cite sources where possible. Do not speculate beyond
-                what the evidence supports.
+            raw_search: Optional[str] = None
+            source_label = "unknown"
 
-                Output a concise research summary for a professional forecaster.
+            # ── Tier 1: Tavily ──────────────────────────────────────────
+            if TAVILY_AVAILABLE:
+                logger.info("Research tier 1: Tavily")
+                raw_search = await _research_tavily(query)
+                if raw_search:
+                    source_label = "Tavily (advanced)"
+
+            # ── Tier 2: Exa ─────────────────────────────────────────────
+            if raw_search is None and EXA_AVAILABLE:
+                logger.info("Research tier 2: Exa")
+                raw_search = await _research_exa(query)
+                if raw_search:
+                    source_label = "Exa (neural search)"
+
+            # ── Tier 3: Perplexity Sonar-Pro ────────────────────────────
+            if raw_search is None:
+                logger.info("Research tier 3: Perplexity Sonar-Pro (LLM fallback)")
+                raw_search = await _research_sonar(
+                    self.get_llm("researcher", "llm"), query, today_str
+                )
+                if raw_search:
+                    source_label = "Perplexity Sonar-Pro"
+
+            # ── Total failure ────────────────────────────────────────────
+            if raw_search is None:
+                raw_search = (
+                    "[All research providers failed. "
+                    "Proceeding with model prior knowledge only.]"
+                )
+                source_label = "none"
+                logger.error("All research tiers failed.")
+
+            # ── Synthesize with GPT summarizer ───────────────────────────
+            synthesis_prompt = clean_indents(f"""
+                You are a professional forecasting researcher.
+                Today is {today_str}.
+
+                Below are raw search results for this forecasting question:
+                Question: {question.question_text}
+
+                --- RAW SEARCH RESULTS ---
+                {raw_search}
+                --- END ---
+
+                Synthesize into a concise research brief covering:
+                1. Current status of the topic (as of {today_str})
+                2. Recent developments that shift the probability
+                3. Scheduled events before resolution that matter
+                4. Relevant base rates or historical analogues
+                5. Key uncertainties
+
+                Be factual. Flag any contradictions. Keep it under 400 words.
             """)
 
             try:
-                sonar_response = await self.get_llm("researcher", "llm").invoke(sonar_prompt)
+                synthesis = await self.get_llm("summarizer", "llm").invoke(synthesis_prompt)
             except Exception as e:
-                sonar_response = f"[Perplexity Sonar research failed: {str(e)}]"
+                synthesis = raw_search   # fallback: just use raw results
+                logger.warning(f"Synthesis step failed, using raw results: {e}")
 
             return (
-                f"--- RESEARCH FROM PERPLEXITY SONAR (as of {today_str}) ---\n"
-                f"{sonar_response}\n"
+                f"--- RESEARCH (source: {source_label}, as of {today_str}) ---\n"
+                f"{synthesis}\n"
             )
 
     async def _run_forecast_on_binary(
@@ -180,7 +314,6 @@ class Yrambot(ForecastBot):
             if not question.open_upper_bound
             else f"The question creator thinks it's unlikely to be above {question.upper_bound}."
         )
-
         prompt = clean_indents(f"""
             You are a professional forecaster.
 
@@ -223,14 +356,10 @@ class Yrambot(ForecastBot):
         return ReasonedPrediction(prediction_value=dist, reasoning=reasoning)
 
     async def _make_prediction(self, question: MetaculusQuestion, research: str):
-        """
-        Committee: GPT-5 (primary), GPT-4o, Perplexity Sonar (fallback).
-        Returns median-aggregated prediction.
-        """
         models = [
             "openrouter/openai/gpt-5.1",
             "openrouter/openai/gpt-5.4",
-            "openrouter/perplexity/sonar-pro",   
+            "openrouter/perplexity/sonar-pro",
         ]
         predictions = []
         reasonings = []
@@ -262,9 +391,10 @@ class Yrambot(ForecastBot):
             raise ValueError("All committee models failed — no predictions generated.")
 
         if isinstance(question, BinaryQuestion):
-            median_val = median([p for p in predictions])
-            final_pred = ReasonedPrediction(prediction_value=median_val, reasoning=" | ".join(reasonings))
-
+            final_pred = ReasonedPrediction(
+                prediction_value=median([p for p in predictions]),
+                reasoning=" | ".join(reasonings),
+            )
         elif isinstance(question, MultipleChoiceQuestion):
             options = question.options
             avg_probs = {}
@@ -277,15 +407,13 @@ class Yrambot(ForecastBot):
             total = sum(avg_probs.values())
             if total > 0:
                 avg_probs = {k: v / total for k, v in avg_probs.items()}
-            predicted_options_list = [
-                PredictedOption(option_name=opt, probability=prob)
-                for opt, prob in avg_probs.items()
-            ]
             final_pred = ReasonedPrediction(
-                prediction_value=PredictedOptionList(predicted_options=predicted_options_list),
+                prediction_value=PredictedOptionList(predicted_options=[
+                    PredictedOption(option_name=opt, probability=prob)
+                    for opt, prob in avg_probs.items()
+                ]),
                 reasoning=" | ".join(reasonings),
             )
-
         elif isinstance(question, NumericQuestion):
             target_pts = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
             median_percentiles = []
@@ -296,11 +424,13 @@ class Yrambot(ForecastBot):
                         if abs(item.percentile - pt) < 0.01:
                             vals.append(item.value)
                             break
-                median_val = median(vals) if vals else 0.0
-                median_percentiles.append(Percentile(percentile=pt, value=median_val))
-            final_dist = NumericDistribution.from_question(median_percentiles, question)
-            final_pred = ReasonedPrediction(prediction_value=final_dist, reasoning=" | ".join(reasonings))
-
+                median_percentiles.append(
+                    Percentile(percentile=pt, value=median(vals) if vals else 0.0)
+                )
+            final_pred = ReasonedPrediction(
+                prediction_value=NumericDistribution.from_question(median_percentiles, question),
+                reasoning=" | ".join(reasonings),
+            )
         else:
             final_pred = ReasonedPrediction(
                 prediction_value=predictions[0], reasoning=" | ".join(reasonings)
@@ -334,18 +464,13 @@ logger.info("Monkey-patched 'PredictedOptionList' validator successfully.")
 # ------------------------------------------------------------------
 
 
-# -----------------------------
-# MAIN
-# -----------------------------
 if __name__ == "__main__":
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     logging.getLogger("LiteLLM").propagate = False
 
     parser = argparse.ArgumentParser(description="Run Yrambot")
     parser.add_argument(
-        "--tournament-ids",
-        nargs="+",
-        type=str,
+        "--tournament-ids", nargs="+", type=str,
         default=["33022", MetaculusApi.CURRENT_MINIBENCH_ID],
     )
     args = parser.parse_args()
