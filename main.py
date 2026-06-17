@@ -134,8 +134,8 @@ async def _research_sonar(llm, query: str, today_str: str) -> Optional[str]:
 class Yrambot(ForecastBot):
     """
     Conservative hybrid forecaster.
-    Research chain: Tavily → Exa → Perplexity Sonar-Pro (first success wins).
-    Committee: GPT-5.1, GPT-5.4, Perplexity Sonar-Pro.
+    Research chain: Tavily → Exa → xiaomi/mimo-v2.5 (first success wins).
+    Committee: GPT-5.1, GPT-5.4, xiaomi/mimo-v2.5o.
     """
 
     _max_concurrent_questions = 1
@@ -145,7 +145,7 @@ class Yrambot(ForecastBot):
         return {
             "default":    "openrouter/openai/gpt-5.5",
             "parser":     "openrouter/openai/gpt-4.1-mini",
-            "researcher": "openrouter/perplexity/sonar-pro",   # Sonar as last-resort researcher
+            "researcher": "openrouter/xiaomi/mimo-v2.5",   # Sonar as last-resort researcher
             "summarizer": "openrouter/openai/gpt-4.1-mini",
         }
 
@@ -359,7 +359,7 @@ class Yrambot(ForecastBot):
         models = [
             "openrouter/openai/gpt-5.1",
             "openrouter/openai/gpt-5.4",
-            "openrouter/perplexity/sonar-pro",
+            "openrouter/xiaomi/mimo-v2.5",
         ]
         predictions = []
         reasonings = []
