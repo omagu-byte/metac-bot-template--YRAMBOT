@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import dotenv
@@ -349,6 +350,80 @@ class ExaSource(BaseSource):
             return f"Query: {query}\n- Exa failed: {type(exc).__name__}: {exc}"
 
 
+def _format_serpapi_results(query: str, results: dict[str, Any], max_results: int = 6) -> str:
+    lines = [f"Query: {query}"]
+
+    answer_box = results.get("answer_box") or {}
+    if isinstance(answer_box, dict):
+        answer = (answer_box.get("answer") or answer_box.get("snippet") or "").strip()
+        if answer:
+            lines.append(f"- Answer box: {answer}")
+
+    knowledge_graph = results.get("knowledge_graph") or {}
+    if isinstance(knowledge_graph, dict):
+        kg_title = (knowledge_graph.get("title") or "").strip()
+        kg_desc  = (knowledge_graph.get("description") or "").strip()
+        if kg_title or kg_desc:
+            lines.append(f"- Knowledge graph: {kg_title}")
+            if kg_desc:
+                lines.append(f"  Notes: {kg_desc[:1200]}")
+
+    organic = results.get("organic_results") or []
+    for r in organic[:max_results]:
+        if not isinstance(r, dict):
+            continue
+        title   = (r.get("title")   or "").strip()
+        url     = (r.get("link")    or "").strip()
+        snippet = (r.get("snippet") or "").strip()
+        date    = (r.get("date")    or "").strip()
+        if title or url or snippet:
+            lines.append(f"- {title}")
+            if url:
+                lines.append(f"  URL: {url}")
+            if date:
+                lines.append(f"  Date: {date}")
+            if snippet:
+                lines.append(f"  Notes: {snippet[:1200]}")
+
+    return "\n".join(lines).strip()
+
+
+class SerpApiSource(BaseSource):
+    name     = "serpapi_google"
+    _API_URL = "https://serpapi.com/search.json"
+
+    def __init__(self, api_key: str, num_results: int = 6, timeout_s: int = 30):
+        self._api_key     = api_key
+        self._num_results = num_results
+        self._timeout_s   = timeout_s
+
+    def is_available(self) -> bool:
+        return bool(self._api_key)
+
+    def _get_json(self, query: str) -> dict[str, Any]:
+        params = urlencode({
+            "engine":  "google",
+            "q":       query,
+            "api_key": self._api_key,
+            "num":     self._num_results,
+        })
+        req = Request(f"{self._API_URL}?{params}",
+                      headers={"Accept": "application/json"}, method="GET")
+        with urlopen(req, timeout=self._timeout_s) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    async def fetch(self, query: str) -> str:
+        if not self._api_key:
+            return ""
+        try:
+            raw = await asyncio.to_thread(self._get_json, query)
+            if raw.get("error"):
+                return f"Query: {query}\n- SerpAPI failed: {raw['error']}"
+            return _format_serpapi_results(query, raw, self._num_results)
+        except Exception as exc:
+            return f"Query: {query}\n- SerpAPI failed: {type(exc).__name__}: {exc}"
+
+
 @dataclass
 class ValidationRecord:
     question_url:           str
@@ -469,7 +544,7 @@ class ResearchCache:
 
 class Yrambot(ForecastBot):
     """
-    Yrambot – superforecaster bot with multi-API research (Tavily + Exa).
+    Yrambot – superforecaster bot with multi-API research (Tavily + Exa + SerpAPI).
 
     Forecasting LLMs: Vultr Serverless Inference (primary for 2 of 3 committee
     votes, secondary model for the third). All forecast prompts require grounding
@@ -512,6 +587,8 @@ class Yrambot(ForecastBot):
         ))
         exa_key = os.getenv("EXA_API_KEY", "").strip()
         self._sources.register(ExaSource(api_key=exa_key))
+        serpapi_key = (SERPAPI_API_KEY or "").strip()
+        self._sources.register(SerpApiSource(api_key=serpapi_key))
 
     def register_source(self, source: BaseSource) -> None:
         self._sources.register(source)
@@ -712,7 +789,7 @@ class Yrambot(ForecastBot):
             source_bundle   = await self._multi_source_research_bundle(question, profile)
             metaculus_block = self._format_metaculus_research(question)
             research_raw    = (
-                f"{base}\n\n--- MULTI-SOURCE RESEARCH (Metaculus / Tavily / Exa) ---\n"
+                f"{base}\n\n--- MULTI-SOURCE RESEARCH (Metaculus / Tavily / Exa / SerpAPI) ---\n"
                 f"{metaculus_block}\n\n{source_bundle}"
                 if source_bundle else f"{base}\n\n--- Metaculus research ---\n{metaculus_block}"
             )

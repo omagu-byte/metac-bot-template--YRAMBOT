@@ -40,6 +40,7 @@ _VULTR_MODELS = [
 
 TAVILY_API_KEY  = os.getenv("TAVILY_API_KEY")
 EXA_API_KEY     = os.getenv("EXA_API_KEY")
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 METACULUS_TOKEN = os.getenv("METACULUS_TOKEN")
 
 
@@ -111,6 +112,7 @@ async def diagnose_all() -> dict:
         "VULTR_SERVERLESS_INFERENCE_API_KEY": bool(VULTR_API_KEY),
         "TAVILY_API_KEY":  bool(TAVILY_API_KEY),
         "EXA_API_KEY":     bool(EXA_API_KEY),
+        "SERPAPI_API_KEY": bool(SERPAPI_API_KEY),
         "METACULUS_TOKEN": bool(METACULUS_TOKEN),
     }
 
@@ -125,9 +127,9 @@ async def diagnose_all() -> dict:
             "Get one from the Vultr Console → Serverless Inference."
         )
 
-    if not TAVILY_API_KEY and not EXA_API_KEY:
+    if not TAVILY_API_KEY and not EXA_API_KEY and not SERPAPI_API_KEY:
         report["recommendations"].append(
-            "Neither TAVILY_API_KEY nor EXA_API_KEY is set. "
+            "No research API keys set (TAVILY_API_KEY, EXA_API_KEY, SERPAPI_API_KEY). "
             "Research quality will be limited without at least one search provider."
         )
 
