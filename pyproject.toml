@@ -8,7 +8,6 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"
-python-decouple = "^3.8"
 requests = "^2.32.3"
 asknews = "^0.11.2"
 numpy = "^2.3.0"
@@ -18,9 +17,9 @@ tavily-python = "^0.7.17"
 forecasting-tools = "^0.2.54"
 yfinance = "^1.2.0"
 
-
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.5"
+typeguard = "^4.3.0"
 
 [build-system]
 requires = ["poetry-core"]

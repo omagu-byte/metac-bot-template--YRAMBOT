@@ -10,11 +10,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import dotenv
 import numpy as np
-import requests
 
 from forecasting_tools import (
     BinaryPrediction,
@@ -51,15 +51,25 @@ logger = logging.getLogger(__name__)
 TAVILY_API_KEY  = os.getenv("TAVILY_API_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 
-_MODEL_PRIMARY               = "openrouter/openai/o3"
-_MODEL_SECONDARY             = "openrouter/openai/o4-mini"
-_OPENROUTER_WEB_SEARCH_MODEL = "openrouter/openai/o3:online"
+VULTR_API_BASE = os.getenv("VULTR_INFERENCE_API_BASE", "https://api.vultrinference.com/v1")
+VULTR_API_KEY  = os.getenv("VULTR_SERVERLESS_INFERENCE_API_KEY", "")
 
-_CLAUDE_OPUS_MODEL   = _MODEL_PRIMARY
-_CLAUDE_SONNET_MODEL = _MODEL_PRIMARY
-_GPT_MODEL           = _MODEL_PRIMARY
-_CLAUDE_4_MODEL      = _MODEL_SECONDARY
-_PERPLEXITY_MODEL    = _MODEL_PRIMARY
+# Vultr model IDs (openai/ prefix routes via LiteLLM OpenAI-compatible provider)
+_MODEL_PRIMARY   = os.getenv("VULTR_MODEL_PRIMARY",   "openai/deepseek-r1-distill-llama-70b")
+_MODEL_SECONDARY = os.getenv("VULTR_MODEL_SECONDARY", "openai/llama-3.3-70b-instruct-fp8")
+_MODEL_PARSER    = os.getenv("VULTR_MODEL_PARSER",    "openai/qwen2.5-32b-instruct")
+
+
+def _make_vultr_llm(model: str, *, temperature: float = 0.10, timeout: int = 90,
+                    allowed_tries: int = 3) -> GeneralLlm:
+    return GeneralLlm(
+        model=model,
+        temperature=temperature,
+        timeout=timeout,
+        allowed_tries=allowed_tries,
+        api_key=VULTR_API_KEY,
+        base_url=VULTR_API_BASE,
+    )
 
 DOMAINS = [
     "geopolitics", "economics", "technology", "science",
@@ -340,48 +350,78 @@ class ExaSource(BaseSource):
             return f"Query: {query}\n- Exa failed: {type(exc).__name__}: {exc}"
 
 
-class OpenRouterWebSearchSource(BaseSource):
-    name    = "openrouter_web_search"
-    _API_URL = "https://openrouter.ai/api/v1/chat/completions"
+def _format_serpapi_results(query: str, results: dict[str, Any], max_results: int = 6) -> str:
+    lines = [f"Query: {query}"]
 
-    def __init__(self, api_key: str, model: str | None = None, timeout_s: int = 30):
-        self._api_key   = api_key
-        self._model     = model or _OPENROUTER_WEB_SEARCH_MODEL
-        self._timeout_s = timeout_s
+    answer_box = results.get("answer_box") or {}
+    if isinstance(answer_box, dict):
+        answer = (answer_box.get("answer") or answer_box.get("snippet") or "").strip()
+        if answer:
+            lines.append(f"- Answer box: {answer}")
+
+    knowledge_graph = results.get("knowledge_graph") or {}
+    if isinstance(knowledge_graph, dict):
+        kg_title = (knowledge_graph.get("title") or "").strip()
+        kg_desc  = (knowledge_graph.get("description") or "").strip()
+        if kg_title or kg_desc:
+            lines.append(f"- Knowledge graph: {kg_title}")
+            if kg_desc:
+                lines.append(f"  Notes: {kg_desc[:1200]}")
+
+    organic = results.get("organic_results") or []
+    for r in organic[:max_results]:
+        if not isinstance(r, dict):
+            continue
+        title   = (r.get("title")   or "").strip()
+        url     = (r.get("link")    or "").strip()
+        snippet = (r.get("snippet") or "").strip()
+        date    = (r.get("date")    or "").strip()
+        if title or url or snippet:
+            lines.append(f"- {title}")
+            if url:
+                lines.append(f"  URL: {url}")
+            if date:
+                lines.append(f"  Date: {date}")
+            if snippet:
+                lines.append(f"  Notes: {snippet[:1200]}")
+
+    return "\n".join(lines).strip()
+
+
+class SerpApiSource(BaseSource):
+    name     = "serpapi_google"
+    _API_URL = "https://serpapi.com/search.json"
+
+    def __init__(self, api_key: str, num_results: int = 6, timeout_s: int = 30):
+        self._api_key     = api_key
+        self._num_results = num_results
+        self._timeout_s   = timeout_s
 
     def is_available(self) -> bool:
         return bool(self._api_key)
 
+    def _get_json(self, query: str) -> dict[str, Any]:
+        params = urlencode({
+            "engine":  "google",
+            "q":       query,
+            "api_key": self._api_key,
+            "num":     self._num_results,
+        })
+        req = Request(f"{self._API_URL}?{params}",
+                      headers={"Accept": "application/json"}, method="GET")
+        with urlopen(req, timeout=self._timeout_s) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+
     async def fetch(self, query: str) -> str:
         if not self._api_key:
             return ""
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": (
-                    "You are a research assistant with live web access. "
-                    "For the query below, return the most relevant up-to-date "
-                    "facts, figures, dates, and sources a forecaster would need. "
-                    "Cite source names/URLs inline where possible. Do not produce "
-                    "a forecast or probability yourself.")},
-                {"role": "user", "content": query},
-            ],
-            "temperature": 0.0,
-            "max_tokens": 1200,
-        }
-        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
         try:
-            response = await asyncio.to_thread(
-                requests.post, self._API_URL, json=payload, headers=headers, timeout=self._timeout_s)
-            if not response.ok:
-                return f"Query: {query}\n- OpenRouter web search failed: {response.status_code} {response.text[:300]}"
-            data    = response.json()
-            content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "")
-            if not content.strip():
-                return f"Query: {query}\n- OpenRouter web search returned empty content"
-            return f"[OpenRouter Web Search ({self._model})]\nQuery: {query}\n{content.strip()}"
+            raw = await asyncio.to_thread(self._get_json, query)
+            if raw.get("error"):
+                return f"Query: {query}\n- SerpAPI failed: {raw['error']}"
+            return _format_serpapi_results(query, raw, self._num_results)
         except Exception as exc:
-            return f"Query: {query}\n- OpenRouter web search failed: {type(exc).__name__}: {exc}"
+            return f"Query: {query}\n- SerpAPI failed: {type(exc).__name__}: {exc}"
 
 
 @dataclass
@@ -504,27 +544,30 @@ class ResearchCache:
 
 class Yrambot(ForecastBot):
     """
-    Yrambot – superforecaster bot with multi-API research (Tavily + Exa).
+    Yrambot – superforecaster bot with multi-API research (Tavily + Exa + SerpAPI).
 
-    Forecasting LLMs: openrouter/openai/o3 (primary, 2 of 3 committee votes)
-    and openrouter/openai/o4-mini (secondary, 1 of 3 committee votes).
-    All forecast prompts require grounding in the research block over
-    the model's own priors (see _research_grounding_instruction).
+    Forecasting LLMs: Vultr Serverless Inference (primary for 2 of 3 committee
+    votes, secondary model for the third). All forecast prompts require grounding
+    in the research block over the model's own priors (see _research_grounding_instruction).
     """
 
     _max_concurrent_questions            = 3
     _concurrency_limiter                 = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
     _min_seconds_between_search_calls    = 1.2
-    _min_seconds_between_llm_calls       = 0.35
+    _min_seconds_between_llm_calls       = 0.50
     _last_search_call_ts                 = 0.0
     _last_llm_call_ts                    = 0.0
 
     def __init__(self, *args, client_spec: ClientSpecialisation | None = None, **kwargs):
         llms = kwargs.pop("llms", None)
         if llms is None:
-            o3_llm = GeneralLlm(model=_MODEL_PRIMARY, temperature=0.10, timeout=90, allowed_tries=3)
-            llms = {"default": o3_llm, "summarizer": o3_llm, "researcher": o3_llm, "parser": o3_llm}
+            llms = {
+                "default":    _make_vultr_llm(_MODEL_PRIMARY,   timeout=120),
+                "summarizer": _make_vultr_llm(_MODEL_PRIMARY,   timeout=120),
+                "researcher": _make_vultr_llm(_MODEL_PRIMARY,   timeout=90),
+                "parser":     _make_vultr_llm(_MODEL_PARSER,    timeout=60),
+            }
         super().__init__(*args, llms=llms, **kwargs)
 
         self._client_spec    = client_spec or ClientSpecialisation()
@@ -544,8 +587,8 @@ class Yrambot(ForecastBot):
         ))
         exa_key = os.getenv("EXA_API_KEY", "").strip()
         self._sources.register(ExaSource(api_key=exa_key))
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        self._sources.register(OpenRouterWebSearchSource(api_key=openrouter_key))
+        serpapi_key = (SERPAPI_API_KEY or "").strip()
+        self._sources.register(SerpApiSource(api_key=serpapi_key))
 
     def register_source(self, source: BaseSource) -> None:
         self._sources.register(source)
@@ -746,7 +789,7 @@ class Yrambot(ForecastBot):
             source_bundle   = await self._multi_source_research_bundle(question, profile)
             metaculus_block = self._format_metaculus_research(question)
             research_raw    = (
-                f"{base}\n\n--- MULTI-SOURCE RESEARCH (Metaculus / Tavily / Exa / OpenRouter web search) ---\n"
+                f"{base}\n\n--- MULTI-SOURCE RESEARCH (Metaculus / Tavily / Exa / SerpAPI) ---\n"
                 f"{metaculus_block}\n\n{source_bundle}"
                 if source_bundle else f"{base}\n\n--- Metaculus research ---\n{metaculus_block}"
             )
@@ -857,12 +900,12 @@ class Yrambot(ForecastBot):
         research: str,
         use_claude: bool = False,
     ) -> tuple[Any, str]:
-        """Single committee vote. use_claude=True routes through _MODEL_SECONDARY (o4-mini)."""
+        """Single committee vote. use_claude=True routes through _MODEL_SECONDARY."""
         if use_claude:
             original_default = self._llms.get("default")
             original_parser  = self._llms.get("parser")
-            self._llms["default"] = GeneralLlm(model=_MODEL_SECONDARY, temperature=0.1, timeout=90, allowed_tries=3)
-            self._llms["parser"]  = GeneralLlm(model=_MODEL_SECONDARY, temperature=0.1, timeout=90, allowed_tries=3)
+            self._llms["default"] = _make_vultr_llm(_MODEL_SECONDARY, timeout=90)
+            self._llms["parser"]  = _make_vultr_llm(_MODEL_PARSER,    timeout=60)
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         reasoning = ""
@@ -923,8 +966,8 @@ class Yrambot(ForecastBot):
                 result = None
         finally:
             if use_claude:
-                self._llms["default"] = original_default or GeneralLlm(model=_MODEL_PRIMARY, temperature=0.10, timeout=90, allowed_tries=3)
-                self._llms["parser"]  = original_parser  or GeneralLlm(model=_MODEL_PRIMARY, temperature=0.10, timeout=90, allowed_tries=3)
+                self._llms["default"] = original_default or _make_vultr_llm(_MODEL_PRIMARY, timeout=120)
+                self._llms["parser"]  = original_parser  or _make_vultr_llm(_MODEL_PARSER,    timeout=60)
 
         return result, reasoning
 
@@ -1216,8 +1259,8 @@ if __name__ == "__main__":
                         default="tournament")
     parser.add_argument("--tournament-ids", nargs="+", type=str, default=None,
                         help="Tournament IDs to forecast on (for tournament mode)")
-    parser.add_argument("--use-committee", action="store_true", default=False,
-                        help="Use committee voting (o3 x2 + o4-mini) with median aggregation")
+    parser.add_argument("--use-committee", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use committee voting (primary x2 + secondary) with median aggregation")
     args    = parser.parse_args()
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
