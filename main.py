@@ -48,6 +48,23 @@ except ImportError:
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
+
+def _get_option_name(option: Any) -> str:
+    if hasattr(option, "option_name"):
+        return option.option_name
+    if isinstance(option, dict):
+        return option.get("option", option.get("option_name", ""))
+    return ""
+
+
+def _get_option_probability(option: Any) -> float:
+    if hasattr(option, "probability"):
+        return float(option.probability)
+    if isinstance(option, dict):
+        return float(option.get("probability", 0.0))
+    return 0.0
+
+
 TAVILY_API_KEY  = os.getenv("TAVILY_API_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 
@@ -987,12 +1004,17 @@ class Yrambot(ForecastBot):
             if not forecasts:
                 logger.warning(f"[Yrambot] All committee members failed for {question.page_url}")
                 return ReasonedPrediction(prediction_value=PredictedOptionList([]), reasoning="Committee failed")
-            all_probs    = np.array([[opt["probability"] for opt in f.predicted_options] for f in forecasts])
+            all_probs = np.array([
+                [_get_option_probability(opt) for opt in forecast.predicted_options]
+                for forecast in forecasts
+            ])
             median_probs = np.median(all_probs, axis=0)
             median_probs = median_probs / median_probs.sum() if median_probs.sum() > 0 else np.full_like(median_probs, 1.0 / len(median_probs))
             options = forecasts[0].predicted_options
-            median_forecast = PredictedOptionList([{"option": opt["option"], "probability": float(p)}
-                                                   for opt, p in zip(options, median_probs)])
+            median_forecast = PredictedOptionList([
+                {"option_name": _get_option_name(opt), "probability": float(p)}
+                for opt, p in zip(options, median_probs)
+            ])
             logger.info(f"[Yrambot] Committee multiple_choice: median_probs={list(median_probs)}")
             result = ReasonedPrediction(prediction_value=median_forecast, reasoning=" | ".join(reasonings))
         else:
