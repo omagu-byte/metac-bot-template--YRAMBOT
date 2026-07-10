@@ -1274,7 +1274,7 @@ if __name__ == "__main__":
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,
-        skip_previously_forecasted_questions=False,
+        skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=False,
     )
     bot._use_committee_voting = args.use_committee
@@ -1282,7 +1282,7 @@ if __name__ == "__main__":
 
     if run_mode == "tournament":
         if args.tournament_ids is None:
-            args.tournament_ids = ["market-pulse-26q2", "33022", client.CURRENT_MINIBENCH_ID]
+            args.tournament_ids = ["market-pulse-26q3", "33022", client.CURRENT_MINIBENCH_ID]
         all_reports = []
         for tid in args.tournament_ids:
             logger.info(f"Forecasting on tournament: {tid}")
